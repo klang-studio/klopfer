@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use klopfer_dsp::{slot_index, NUM_LAYERS};
-use nih_plug_egui::egui::{self, RichText, Ui};
+use egui::{self, RichText, Ui};
 
 use super::drop::DropTarget;
 use super::widgets::plain_choice;

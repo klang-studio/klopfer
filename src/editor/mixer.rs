@@ -3,7 +3,7 @@
 use std::sync::atomic::Ordering;
 
 use klopfer_dsp::PADS_PER_BANK;
-use nih_plug_egui::egui::{self, vec2, Align2, CornerRadius, RichText, Sense, Stroke, Ui};
+use egui::{self, vec2, Align2, CornerRadius, RichText, Sense, Stroke, Ui};
 
 use super::drop::DropTarget;
 use super::widgets::{fader, toggle, Knob};

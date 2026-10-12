@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use klopfer_dsp::{NUM_LAYERS, NUM_PADS};
-use nih_plug::prelude::PluginState;
-use nih_plug::wrapper::state::ParamValue;
+use nice_plug::prelude::PluginState;
+use nice_plug::plugin::ParamValue;
 
 use crate::layers::{LayerConfig, LayerModeConfig, LayerSlotConfig};
 

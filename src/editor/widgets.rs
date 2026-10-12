@@ -3,8 +3,8 @@
 use std::f32::consts::PI;
 use std::sync::Arc;
 
-use nih_plug::prelude::{BoolParam, Enum, EnumParam, Param, ParamPtr, ParamSetter};
-use nih_plug_egui::egui::{
+use nice_plug::prelude::{BoolParam, Enum, EnumParam, Param, ParamPtr, ParamSetter};
+use egui::{
     self, pos2, vec2, Align2, Color32, CornerRadius, Response, Sense, Shape, Stroke, StrokeKind,
     Ui, Widget,
 };
@@ -44,16 +44,16 @@ fn midi_learn(ui: &Ui, response: &Response, ptr: ParamPtr) -> LearnState {
         if state.learning {
             if ui.button("Cancel MIDI Learn").clicked() {
                 learn.cancel_learning();
-                ui.close_menu();
+                ui.close();
             }
         } else if ui.button("MIDI Learn").clicked() {
             learn.start_learning(ptr);
-            ui.close_menu();
+            ui.close();
         }
         if let Some(cc) = state.cc {
             if ui.button(format!("Forget CC {cc}")).clicked() {
                 learn.forget(ptr);
-                ui.close_menu();
+                ui.close();
             }
         }
     });
@@ -128,7 +128,16 @@ fn drag_param<P: Param>(
     }
 
     if response.hovered() && !response.dragged() {
-        let scroll = ui.input(|i| i.raw_scroll_delta.y);
+        let scroll: f32 = ui.input(|i| {
+            i.raw
+                .events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::MouseWheel { delta, .. } => Some(delta.y),
+                    _ => None,
+                })
+                .sum()
+        });
         if scroll != 0.0 {
             let step = match param.step_count() {
                 Some(n) if n > 0 => 1.0 / n as f32,
@@ -449,7 +458,7 @@ pub fn amount_bar<P: Param>(ui: &mut Ui, param: &P, setter: &ParamSetter, width:
 /// A drop-down for a list of plain values (not a parameter). Returns whether it changed.
 pub fn plain_choice<T: Copy + PartialEq>(
     ui: &mut Ui,
-    id: impl std::hash::Hash,
+    id: impl std::hash::Hash + std::fmt::Debug,
     value: &mut T,
     options: &[(T, &str)],
     width: f32,

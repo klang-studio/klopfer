@@ -1,12 +1,15 @@
-use baseview::{PhySize, Window};
+use super::OpenGlError;
+use baseview::WindowContext;
+use baseview::dpi::PhysicalSize;
+use baseview::gl::GlConfig;
 use egui::FullOutput;
 use egui_glow::Painter;
 use std::sync::Arc;
 
-use super::OpenGlError;
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GraphicsConfig {
+    pub gl_config: GlConfig,
+
     /// Controls whether to apply dithering to minimize banding artifacts.
     ///
     /// Dithering assumes an sRGB output and thus will apply noise to any input value that lies between
@@ -26,6 +29,7 @@ pub struct GraphicsConfig {
 impl Default for GraphicsConfig {
     fn default() -> Self {
         Self {
+            gl_config: GlConfig::default(),
             shader_version: None,
             dithering: true,
         }
@@ -33,20 +37,19 @@ impl Default for GraphicsConfig {
 }
 
 pub struct Renderer {
-    glow_context: Arc<egui_glow::glow::Context>,
+    pub glow_context: Arc<egui_glow::glow::Context>,
     painter: Painter,
 }
 
 impl Renderer {
-    pub fn new(window: &Window, config: GraphicsConfig) -> Result<Self, OpenGlError> {
+    pub fn new(window: WindowContext, config: GraphicsConfig) -> Result<Self, OpenGlError> {
         let context = window.gl_context().ok_or(OpenGlError::NoContext)?;
         unsafe {
-            context.make_current();
+            context.make_current()?;
         }
 
-        #[allow(clippy::arc_with_non_send_sync)]
         let glow_context = Arc::new(unsafe {
-            egui_glow::glow::Context::from_loader_function(|s| context.get_proc_address(s))
+            egui_glow::glow::Context::from_loader_function_cstr(|s| context.get_proc_address(s))
         });
 
         let painter = egui_glow::Painter::new(
@@ -58,7 +61,7 @@ impl Renderer {
         .map_err(OpenGlError::CreatePainter)?;
 
         unsafe {
-            context.make_not_current();
+            context.make_not_current()?;
         }
 
         Ok(Self {
@@ -73,14 +76,14 @@ impl Renderer {
 
     pub fn render(
         &mut self,
-        window: &Window,
-        bg_color: egui::Rgba,
-        physical_size: PhySize,
+        window: &WindowContext,
+        clear_color: egui::Rgba,
+        physical_size: PhysicalSize<u32>,
         pixels_per_point: f32,
         egui_ctx: &mut egui::Context,
         full_output: &mut FullOutput,
     ) {
-        let PhySize {
+        let PhysicalSize {
             width: canvas_width,
             height: canvas_height,
         } = physical_size;
@@ -92,18 +95,25 @@ impl Renderer {
             .gl_context()
             .expect("failed to get baseview gl context");
         unsafe {
-            context.make_current();
+            context.make_current().unwrap();
         }
 
         unsafe {
             use egui_glow::glow::HasContext as _;
-            self.glow_context
-                .clear_color(bg_color.r(), bg_color.g(), bg_color.b(), bg_color.a());
+            self.glow_context.clear_color(
+                clear_color.r(),
+                clear_color.g(),
+                clear_color.b(),
+                clear_color.a(),
+            );
             self.glow_context.clear(egui_glow::glow::COLOR_BUFFER_BIT);
         }
 
-        for (id, image_delta) in &textures_delta.set {
-            self.painter.set_texture(*id, image_delta);
+        #[expect(clippy::iter_over_hash_type)] // Order doesn't matter here
+        for (id, image_deltas) in textures_delta.set.drain() {
+            for image_delta in image_deltas {
+                self.painter.set_texture(id, &image_delta);
+            }
         }
 
         let clipped_primitives = egui_ctx.tessellate(shapes, pixels_per_point);
@@ -112,13 +122,14 @@ impl Renderer {
         self.painter
             .paint_primitives(dimensions, pixels_per_point, &clipped_primitives);
 
-        for id in textures_delta.free.drain(..) {
+        #[expect(clippy::iter_over_hash_type)] // Order doesn't matter here
+        for id in textures_delta.free.drain() {
             self.painter.free_texture(id);
         }
 
         unsafe {
-            context.swap_buffers();
-            context.make_not_current();
+            context.swap_buffers().unwrap();
+            context.make_not_current().unwrap();
         }
     }
 }

@@ -1,6 +1,6 @@
 //! MIDI learn: CC assignments and the values they set.
 //!
-//! nih-plug only lets the editor tell the host about parameter changes. So a learned CC changes
+//! nice-plug only lets the editor tell the host about parameter changes. So a learned CC changes
 //! the sound right away through an override the audio thread applies on top of the parameter
 //! value, and the editor, while it's open, forwards the value to the host. Once the host's value
 //! matches, or the host changes the parameter itself, the override is dropped.
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use atomic_float::AtomicF32;
-use nih_plug::prelude::*;
+use nice_plug::prelude::*;
 
 /// A learned value the host hasn't caught up with yet. Audio thread only.
 #[derive(Debug, Clone, Copy)]

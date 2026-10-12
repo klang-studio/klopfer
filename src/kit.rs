@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 use klopfer_dsp::{slot_index, NUM_LAYERS, NUM_PADS, NUM_SAMPLE_SLOTS};
-use nih_plug::prelude::PluginState;
+use nice_plug::prelude::PluginState;
 
 use crate::layers::LayerConfig;
 

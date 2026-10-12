@@ -1,9 +1,10 @@
 # Klopfer
 
 A 16 pad drum sampler plugin (VST3 + CLAP) for Windows, macOS and Linux, written in Rust with
-[nih-plug](https://github.com/robbert-vdh/nih-plug). Layout and workflow are inspired by TAL-Drum.
+[nice-plug](https://codeberg.org/RustAudio/nice-plug), the successor of nih-plug. Layout and
+workflow are inspired by TAL-Drum.
 
-License: GPL-3.0-or-later (required by the VST3 bindings nih-plug uses).
+License: GPL-3.0-or-later.
 
 ## Features
 
@@ -32,9 +33,9 @@ License: GPL-3.0-or-later (required by the VST3 bindings nih-plug uses).
   (velocity, `seq_length` round robin, `lorand`/`hirand` random), `group`/`off_by` become choke
   groups; volume, pan, tune, transpose and the amp envelope are taken over
 - WAV, AIFF, FLAC, OGG and MP3 samples, decoded on a background thread
-- Drag and drop from Finder/Explorer: onto a pad (several files fill the following pads), onto the
+- Drag and drop from the file manager: onto a pad (several files fill the following pads), onto the
   waveform or a layer row (several files fill the following layers), `.klopfer` files anywhere load
-  the kit. Not available on Linux
+  the kit
 - Projects store sample paths; missing samples can be relinked per layer or by searching a folder
 - Kit files (`.klopfer`) store samples relative to the kit, so kit folders stay portable. Kits and
   projects from the single-sample version are migrated to layer 1
@@ -51,7 +52,7 @@ src/                  plugin: parameters, sample bank/loader, kits, process(), e
 xtask/                bundler (`cargo xtask bundle`)
 tools/testkit/        generates a synthetic drum kit for development
 tools/reaper-render-test.py   end-to-end test rendering through REAPER
-vendor/               patched baseview and egui-baseview for drag and drop, see vendor/README.md
+vendor/               patched nice-plug, baseview and egui-baseview, see vendor/README.md
 ```
 
 ## Building
@@ -75,7 +76,7 @@ via XWayland.
 ```bash
 cargo test --workspace
 cargo run -p testkit -- testkit-out              # synthetic kit (+ SFZ and a loop) in testkit-out/
-python3 tools/reaper-render-test.py              # needs REAPER and the installed CLAP:
+python3 tools/reaper-render-test.py [REAPER]     # needs REAPER and the installed CLAP:
                                                  # groove, MIDI learn and offline time stretch
 ```
 
@@ -87,13 +88,15 @@ KLOPFER_KIT=$PWD/testkit-out/Testkit.klopfer ./target/release/klopfer_standalone
 ```
 
 `KLOPFER_EDITOR=pad=13,tab=mod` (also `tab=layers`, `tab=edit`, `tab=rec`, `view=mixer`) opens the standalone editor in
-a given state, e.g. for screenshots. `-l 2` selects the stereo layout. The standalone uses the output device's sample rate unless
-`-r` is given, because nih-plug's CoreAudio/WASAPI backend aborts on a sample rate mismatch. Use
-`-b dummy` for a GUI check without audio, `--midi-input "<device>"` for a MIDI keyboard.
+a given state, e.g. for screenshots. `-l 2` selects the stereo layout. Unless `-r` is given, the
+standalone uses the JACK server's sample rate (JACK backend, also tried first without `-b`) or the
+output device's: nice-plug's CoreAudio/WASAPI backend aborts on a sample rate mismatch, and its JACK
+backend would initialize the plugin with the wrong rate. Use `-b dummy` for a GUI check without
+audio, `--midi-input "<device>"` for a MIDI keyboard.
 
 ## Known limitations
 
-- Drag and drop needs the patched GUI dependencies in `vendor/` and doesn't work on Linux.
+- Drag and drop needs the patched GUI dependencies in `vendor/`. On Linux it is untested.
 - When a time stretched rendering finishes, voices still playing the old one of that layer stop.
 - SFZ: sample offsets, loops and opcodes not listed in `src/sfz.rs` are ignored; Battery and RX2
   kits aren't supported (proprietary formats).

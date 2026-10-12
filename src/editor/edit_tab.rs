@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use klopfer_dsp::slicing::{detect_transients, estimate_bpm, regions, slice_by_beats};
 use klopfer_dsp::{slot_index, Sample, NUM_LAYERS, NUM_PADS};
-use nih_plug::prelude::{Param, ParamSetter};
-use nih_plug_egui::egui::{self, pos2, Align2, Rect, RichText, Stroke, Ui};
+use nice_plug::prelude::{Param, ParamSetter};
+use egui::{self, pos2, Align2, Rect, RichText, Stroke, Ui};
 
 use super::dialogs::Request;
 use super::widgets::{choice, plain_choice, section, toggle, Knob};

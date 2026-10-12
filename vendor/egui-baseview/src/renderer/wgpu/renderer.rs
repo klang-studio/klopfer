@@ -1,24 +1,14 @@
-use std::{
-    num::{NonZeroIsize, NonZeroU32},
-    ptr::NonNull,
-    sync::Arc,
-};
+use std::sync::Arc;
 
-use baseview::{PhySize, Window};
+use baseview::{WindowContext, dpi::PhysicalSize};
 use egui::FullOutput;
 use egui_wgpu::{
+    RenderState, RendererOptions, ScreenDescriptor, WgpuError,
     wgpu::{
-        Color, CommandEncoderDescriptor, Extent3d, Instance, InstanceDescriptor,
-        RenderPassColorAttachment, RenderPassDescriptor, Surface, SurfaceConfiguration,
-        SurfaceTargetUnsafe, TextureDescriptor, TextureDimension, TextureUsages, TextureView,
-        TextureViewDescriptor,
+        Color, CommandEncoderDescriptor, Extent3d, RenderPassColorAttachment, RenderPassDescriptor,
+        Surface, SurfaceConfiguration, TextureDescriptor, TextureDimension, TextureUsages,
+        TextureView, TextureViewDescriptor,
     },
-    RenderState, ScreenDescriptor, WgpuError,
-};
-use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
-use raw_window_handle_06::{
-    AppKitDisplayHandle, AppKitWindowHandle, Win32WindowHandle, WindowsDisplayHandle,
-    XcbDisplayHandle, XcbWindowHandle, XlibDisplayHandle, XlibWindowHandle,
 };
 
 pub use egui_wgpu::WgpuConfiguration;
@@ -36,6 +26,9 @@ pub struct GraphicsConfig {
 
     /// Configures wgpu instance/device/adapter/surface creation and renderloop.
     pub wgpu_options: WgpuConfiguration,
+
+    /// Additional options for the wgpu renderer.
+    pub renderer_options: RendererOptions,
 }
 
 impl Default for GraphicsConfig {
@@ -43,98 +36,46 @@ impl Default for GraphicsConfig {
         Self {
             dithering: true,
             wgpu_options: Default::default(),
+            renderer_options: Default::default(),
         }
     }
 }
 
-const MSAA_SAMPLES: u32 = 4;
-
 pub struct Renderer {
     render_state: Arc<RenderState>,
+    instance: wgpu::Instance,
     surface: Surface<'static>,
     config: GraphicsConfig,
     msaa_texture_view: Option<TextureView>,
+    msaa_samples: u32,
     width: u32,
     height: u32,
 }
 
 impl Renderer {
-    pub fn new(window: &Window, config: GraphicsConfig) -> Result<Self, WgpuError> {
-        let instance = Instance::new(InstanceDescriptor::default());
+    pub fn new(window: WindowContext, config: GraphicsConfig) -> Result<Self, WgpuError> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
+            Box::new(window.platform_handle()),
+        ));
 
-        let raw_display_handle = window.raw_display_handle();
-        let raw_window_handle = window.raw_window_handle();
+        let surface = instance.create_surface(window.platform_handle()).unwrap();
 
-        let target = SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: match raw_display_handle {
-                raw_window_handle::RawDisplayHandle::AppKit(_) => {
-                    raw_window_handle_06::RawDisplayHandle::AppKit(AppKitDisplayHandle::new())
-                }
-                raw_window_handle::RawDisplayHandle::Xlib(handle) => {
-                    raw_window_handle_06::RawDisplayHandle::Xlib(XlibDisplayHandle::new(
-                        NonNull::new(handle.display),
-                        handle.screen,
-                    ))
-                }
-                raw_window_handle::RawDisplayHandle::Xcb(handle) => {
-                    raw_window_handle_06::RawDisplayHandle::Xcb(XcbDisplayHandle::new(
-                        NonNull::new(handle.connection),
-                        handle.screen,
-                    ))
-                }
-                raw_window_handle::RawDisplayHandle::Windows(_) => {
-                    raw_window_handle_06::RawDisplayHandle::Windows(WindowsDisplayHandle::new())
-                }
-                _ => todo!(),
-            },
-            raw_window_handle: match raw_window_handle {
-                raw_window_handle::RawWindowHandle::AppKit(handle) => {
-                    raw_window_handle_06::RawWindowHandle::AppKit(AppKitWindowHandle::new(
-                        NonNull::new(handle.ns_view).unwrap(),
-                    ))
-                }
-                raw_window_handle::RawWindowHandle::Xlib(handle) => {
-                    raw_window_handle_06::RawWindowHandle::Xlib(XlibWindowHandle::new(
-                        handle.window,
-                    ))
-                }
-                raw_window_handle::RawWindowHandle::Xcb(handle) => {
-                    raw_window_handle_06::RawWindowHandle::Xcb(XcbWindowHandle::new(
-                        NonZeroU32::new(handle.window).unwrap(),
-                    ))
-                }
-                raw_window_handle::RawWindowHandle::Win32(handle) => {
-                    // will this work? i have no idea!
-                    let mut raw_handle =
-                        Win32WindowHandle::new(NonZeroIsize::new(handle.hwnd as isize).unwrap());
-
-                    raw_handle.hinstance = handle
-                        .hinstance
-                        .is_null()
-                        .then(|| NonZeroIsize::new(handle.hinstance as isize).unwrap());
-
-                    raw_window_handle_06::RawWindowHandle::Win32(raw_handle)
-                }
-                _ => todo!(),
-            },
-        };
-
-        let surface = unsafe { instance.create_surface_unsafe(target) }.unwrap();
+        let msaa_samples = config.renderer_options.msaa_samples;
 
         let state = Arc::new(pollster::block_on(RenderState::create(
             &config.wgpu_options,
             &instance,
-            &surface,
-            None,
-            MSAA_SAMPLES,
-            config.dithering,
+            Some(&surface),
+            config.renderer_options,
         ))?);
 
         Ok(Self {
             render_state: state,
+            instance,
             surface,
             config,
             msaa_texture_view: None,
+            msaa_samples,
             width: 0,
             height: 0,
         })
@@ -154,7 +95,7 @@ impl Renderer {
         let mut surf_config = SurfaceConfiguration {
             usage,
             format: self.render_state.target_format,
-            present_mode: self.config.wgpu_options.present_mode,
+            present_mode: self.config.wgpu_options.surface.present_mode,
             view_formats: vec![self.render_state.target_format],
             ..self
                 .surface
@@ -162,8 +103,11 @@ impl Renderer {
                 .expect("Unsupported surface")
         };
 
-        if let Some(desired_maximum_frame_latency) =
-            self.config.wgpu_options.desired_maximum_frame_latency
+        if let Some(desired_maximum_frame_latency) = self
+            .config
+            .wgpu_options
+            .surface
+            .desired_maximum_frame_latency
         {
             surf_config.desired_maximum_frame_latency = desired_maximum_frame_latency;
         }
@@ -181,40 +125,39 @@ impl Renderer {
         self.configure_surface(width, height);
 
         let texture_format = render_state.target_format;
-        self.msaa_texture_view = Some(
-            render_state
-                .device
-                .create_texture(&TextureDescriptor {
-                    label: Some("egui_msaa_texture"),
-                    size: Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: MSAA_SAMPLES,
-                    dimension: TextureDimension::D2,
-                    format: texture_format,
-                    usage: TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[texture_format],
-                })
-                .create_view(&TextureViewDescriptor::default()),
-        );
+
+        if self.msaa_samples > 1 {
+            self.msaa_texture_view = Some(
+                render_state
+                    .device
+                    .create_texture(&TextureDescriptor {
+                        label: Some("egui_msaa_texture"),
+                        size: Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: self.msaa_samples.max(1),
+                        dimension: TextureDimension::D2,
+                        format: texture_format,
+                        usage: TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[texture_format],
+                    })
+                    .create_view(&TextureViewDescriptor::default()),
+            );
+        }
     }
 
     pub fn render(
         &mut self,
-        bg_color: egui::Rgba,
-        physical_size: PhySize,
+        window: &baseview::WindowContext,
+        clear_color: egui::Rgba,
+        physical_size: PhysicalSize<u32>,
         pixels_per_point: f32,
         egui_ctx: &mut egui::Context,
         full_output: &mut FullOutput,
     ) {
-        let PhySize {
-            width: canvas_width,
-            height: canvas_height,
-        } = physical_size;
-
         let shapes = std::mem::take(&mut full_output.shapes);
 
         let clipped_primitives = egui_ctx.tessellate(shapes, pixels_per_point);
@@ -227,19 +170,21 @@ impl Renderer {
                 });
 
         let screen_descriptor = ScreenDescriptor {
-            size_in_pixels: [canvas_width, canvas_height],
+            size_in_pixels: [physical_size.width, physical_size.height],
             pixels_per_point,
         };
 
         let user_cmd_bufs = {
             let mut renderer = self.render_state.renderer.write();
-            for (id, image_delta) in &full_output.textures_delta.set {
-                renderer.update_texture(
-                    &self.render_state.device,
-                    &self.render_state.queue,
-                    *id,
-                    image_delta,
-                );
+            for (id, image_deltas) in full_output.textures_delta.set.drain() {
+                for image_delta in image_deltas {
+                    renderer.update_texture(
+                        &self.render_state.device,
+                        &self.render_state.queue,
+                        id,
+                        &image_delta,
+                    );
+                }
             }
 
             renderer.update_buffers(
@@ -251,24 +196,39 @@ impl Renderer {
             )
         };
 
-        if self.width != canvas_width
-            || self.height != canvas_height
+        if self.width != physical_size.width
+            || self.height != physical_size.height
             || self.msaa_texture_view.is_none()
         {
-            self.resize_and_generate_msaa_view(canvas_width, canvas_height);
+            self.resize_and_generate_msaa_view(physical_size.width, physical_size.height);
         }
 
-        let output_frame = { self.surface.get_current_texture() };
+        let mut recreate_surface = false;
+        let output_frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture) => Some(texture),
+            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => return,
+            wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Outdated => {
+                None
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                unreachable!("No error scope registered, so validation errors will panic")
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                recreate_surface = true;
+                None
+            }
+        };
 
-        let output_frame = match output_frame {
-            Ok(frame) => frame,
-            Err(err) => match (self.config.wgpu_options.on_surface_error)(err) {
-                egui_wgpu::SurfaceErrorAction::SkipFrame => return,
-                egui_wgpu::SurfaceErrorAction::RecreateSurface => {
-                    self.configure_surface(self.width, self.height);
-                    return;
-                }
-            },
+        let Some(output_frame) = output_frame else {
+            if recreate_surface {
+                self.surface = self
+                    .instance
+                    .create_surface(window.platform_handle())
+                    .unwrap();
+            }
+
+            self.configure_surface(self.width, self.height);
+            return;
         };
 
         {
@@ -277,17 +237,24 @@ impl Renderer {
                 .texture
                 .create_view(&TextureViewDescriptor::default());
 
+            let (view, resolve_target) = if let Some(msaa_view) = &self.msaa_texture_view {
+                (msaa_view, Some(&frame_view))
+            } else {
+                (&frame_view, None)
+            };
+
             let render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("egui_render"),
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: self.msaa_texture_view.as_ref().unwrap(),
-                    resolve_target: Some(&frame_view),
+                    view,
+                    depth_slice: None,
+                    resolve_target,
                     ops: egui_wgpu::wgpu::Operations {
                         load: egui_wgpu::wgpu::LoadOp::Clear(Color {
-                            r: bg_color[0] as f64,
-                            g: bg_color[1] as f64,
-                            b: bg_color[2] as f64,
-                            a: bg_color[3] as f64,
+                            r: clear_color[0] as f64,
+                            g: clear_color[1] as f64,
+                            b: clear_color[2] as f64,
+                            a: clear_color[3] as f64,
                         }),
                         store: egui_wgpu::wgpu::StoreOp::Store,
                     },
@@ -295,6 +262,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             // Forgetting the pass' lifetime means that we are no longer compile-time protected from
@@ -320,6 +288,6 @@ impl Renderer {
             .queue
             .submit(user_cmd_bufs.into_iter().chain([encoded]));
 
-        output_frame.present();
+        self.render_state.queue.present(output_frame);
     }
 }

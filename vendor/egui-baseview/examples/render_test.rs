@@ -1,10 +1,6 @@
-use baseview::{Size, WindowOpenOptions, WindowScalePolicy};
-use egui::Context;
-use egui_baseview::{EguiWindow, GraphicsConfig, Queue};
-
+use egui::{TextureOptions, widgets::color_picker::show_color, *};
+use egui_baseview::{EguiWindow, EguiWindowSettings, Frame, baseview::dpi::LogicalSize};
 use std::collections::HashMap;
-
-use egui::{widgets::color_picker::show_color, TextureOptions, *};
 
 const GRADIENT_SIZE: Vec2 = vec2(256.0, 18.0);
 
@@ -15,13 +11,13 @@ const TRANSPARENT: Color32 = Color32::TRANSPARENT;
 const WHITE: Color32 = Color32::WHITE;
 
 /// A test for sanity-checking and diagnosing egui rendering backends.
-pub struct ColorTest {
+pub struct RenderTest {
     tex_mngr: TextureManager,
     vertex_gradients: bool,
     texture_gradients: bool,
 }
 
-impl Default for ColorTest {
+impl Default for RenderTest {
     fn default() -> Self {
         Self {
             tex_mngr: Default::default(),
@@ -31,12 +27,26 @@ impl Default for ColorTest {
     }
 }
 
-impl ColorTest {
-    pub fn ui(&mut self, ui: &mut Ui) {
-        ui.horizontal_wrapped(|ui|{
+impl egui_baseview::App for RenderTest {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut Frame) {
+        egui::Window::new("rendering test")
+            .scroll(true)
+            .show(ui.ctx(), |ui| {
+                self.inner_ui(ui);
+            });
+    }
+}
+
+impl RenderTest {
+    fn inner_ui(&mut self, ui: &mut Ui) {
+        ui.horizontal_wrapped(|ui| {
             ui.label("This is made to test that the egui rendering backend is set up correctly.");
             ui.add(egui::Label::new("❓").sense(egui::Sense::click()))
-                .on_hover_text("The texture sampling should be sRGB-aware, and every other color operation should be done in gamma-space (sRGB). All colors should use pre-multiplied alpha");
+                .on_hover_text(
+                    "The texture sampling should be sRGB-aware, and every other color operation \
+                     should be done in gamma-space (sRGB). All colors should use pre-multiplied \
+                     alpha",
+                );
         });
 
         ui.separator();
@@ -383,6 +393,10 @@ impl TextureManager {
                 "color_test_gradient",
                 epaint::ColorImage {
                     size: [width, height],
+                    source_size: Vec2 {
+                        x: width as f32,
+                        y: height as f32,
+                    },
                     pixels,
                 },
                 TextureOptions::LINEAR,
@@ -580,7 +594,7 @@ fn paint_fine_lines_and_text(painter: &egui::Painter, mut rect: Rect, color: Col
     rect.max.x = rect.center().x;
 
     rect = rect.shrink(16.0);
-    for width in [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0] {
+    for width in [0.05f32, 0.1f32, 0.25f32, 0.5f32, 1.0f32, 2.0f32, 4.0f32] {
         painter.text(
             rect.left_top(),
             Align2::CENTER_CENTER,
@@ -643,31 +657,25 @@ fn lerp_color_gamma(left: Color32, right: Color32, t: f32) -> Color32 {
 }
 
 fn main() {
-    let settings = WindowOpenOptions {
-        title: String::from("egui-baseview hello world"),
-        size: Size::new(1280.0, 720.0),
-        scale: WindowScalePolicy::SystemScaleFactor,
-        #[cfg(feature = "opengl")]
-        gl_config: Some(Default::default()),
-    };
+    // Used as a workaround for https://github.com/RustAudio/baseview/issues/321
+    //
+    // # Safety
+    //
+    // ONLY call this when running the application in standalone mode. Do *NOT* call this
+    // when running as a plugin that is loaded into a host. For more information, see:
+    // https://docs.rs/baseview/0.3.4/baseview/fn.assume_standalone_in_process.html
+    unsafe { baseview::assume_standalone_in_process() };
 
-    let state = ColorTest::default();
-
-    EguiWindow::open_blocking(
-        settings,
-        GraphicsConfig::default(),
-        state,
-        |_egui_ctx: &Context, _queue: &mut Queue, _state: &mut ColorTest| {},
-        |egui_ctx: &Context, _queue: &mut Queue, state: &mut ColorTest| {
-            egui::Window::new("egui-baseview hello world").show(egui_ctx, |ui| {
-                ui.label("uwu");
-            });
-
-            egui::Window::new("rendering test")
-                .scroll(true)
-                .show(egui_ctx, |ui| {
-                    state.ui(ui);
-                });
-        },
-    );
+    EguiWindow::create(
+        EguiWindowSettings::new()
+            .with_title("egui-baseview render test")
+            .with_size(LogicalSize {
+                width: 1280.0,
+                height: 720.0,
+            }),
+        RenderTest::default(),
+    )
+    .unwrap()
+    .run_until_closed()
+    .unwrap();
 }

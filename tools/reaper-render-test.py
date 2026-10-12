@@ -31,7 +31,7 @@ PPQ = 960
 
 
 def plugin_state(extra_fields: dict | None = None, extra_params: dict | None = None) -> str:
-    """The kit as a base64 CLAP state chunk. nih-plug prefixes its JSON with a u64 LE length."""
+    """The kit as a base64 CLAP state chunk. nice-plug prefixes its JSON with a u64 LE length."""
     kit = json.load(open(KIT))
     kit["fields"].update(extra_fields or {})
     kit["params"].update(extra_params or {})

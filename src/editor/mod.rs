@@ -4,9 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use klopfer_dsp::{slot_index, NUM_LAYERS, NUM_PADS, NUM_SAMPLE_SLOTS, PADS_PER_BANK};
-use nih_plug::prelude::*;
-use nih_plug_egui::create_egui_editor;
-use nih_plug_egui::egui::{self, Align, Color32, CornerRadius, Layout, RichText, Stroke, Ui};
+use nice_plug::prelude::*;
+use nice_plug::context::gui::GuiContext;
+use nice_plug::editor::dpi::LogicalSize;
+use nice_plug_egui::{
+    create_egui_editor, EguiEditor, EguiEditorState, EguiNiceSettings, NiceEguiApp, RepaintNotifier,
+};
+use egui::{self, Align, Color32, CornerRadius, Layout, RichText, Stroke, Ui};
 
 use crate::bank::{PadStatus, Preview, SampleBank};
 use crate::layers::LayerConfig;
@@ -141,79 +145,129 @@ struct Ctx<'a> {
     setter: &'a ParamSetter<'a>,
 }
 
-pub(crate) fn create(
+/// The editor app. Lives as long as the plugin; the GUI context only while a window is open.
+pub struct KlopferEditor {
     params: Arc<KlopferParams>,
     bank: Arc<SampleBank>,
     learn: Arc<MidiLearn>,
     recorder: Arc<Recorder>,
     executor: AsyncExecutor<Klopfer>,
-) -> Option<Box<dyn Editor>> {
+    gui: Option<GuiContext>,
+    state: EditorState,
+}
+
+pub(crate) fn create(
+    editor_state: Arc<EguiEditorState>,
+    params: Arc<KlopferParams>,
+    bank: Arc<SampleBank>,
+    learn: Arc<MidiLearn>,
+    recorder: Arc<Recorder>,
+    executor: AsyncExecutor<Klopfer>,
+) -> Option<EguiEditor<KlopferEditor>> {
     create_egui_editor(
-        params.editor_state.clone(),
-        EditorState::default(),
-        |ctx, _| theme::apply(ctx),
-        move |ctx, setter, state| {
-            bank.collect_garbage();
-            widgets::provide_learn(ctx, &learn);
-
-            // Tell the host about values set by learned MIDI CCs
-            learn.take_pending(|ptr, value| {
-                // SAFETY: the pointer comes from our own parameter map
-                unsafe {
-                    setter.raw_context.raw_begin_set_parameter(ptr);
-                    setter.raw_context.raw_set_parameter_normalized(ptr, value);
-                    setter.raw_context.raw_end_set_parameter(ptr);
-                }
-            });
-
-            let c = Ctx {
-                params: &params,
-                bank: &bank,
-                recorder: &recorder,
-                executor: &executor,
-                setter,
-            };
-
-            if let Some(outcome) = state.dialogs.take_outcome() {
-                apply_dialog_outcome(&c, state, outcome);
-            }
-            rec_tab::collect_take(&c, state);
-            state.drop_zones.clear();
-
-            egui::TopBottomPanel::top("top")
-                .exact_height(52.0)
-                .frame(
-                    egui::Frame::NONE
-                        .fill(theme::PANEL_DARK)
-                        .inner_margin(egui::Margin::symmetric(12, 6)),
-                )
-                .show(ctx, |ui| top_bar(ui, &c, state));
-
-            egui::CentralPanel::default()
-                .frame(
-                    egui::Frame::NONE
-                        .fill(theme::BG)
-                        .inner_margin(egui::Margin::same(12)),
-                )
-                .show(ctx, |ui| match state.view {
-                    View::Pads => pads::pads_view(ui, &c, state),
-                    View::Mixer => mixer::mixer_view(ui, &c, state),
-                });
-
-            drop::handle(ctx, &c, state);
-
-            // Release a previewed pad when the mouse button goes up anywhere
-            if let Some(pad) = state.held_pad {
-                if !ctx.input(|i| i.pointer.primary_down()) {
-                    let _ = bank.previews.push(Preview::Off { pad });
-                    state.held_pad = None;
-                }
-            }
-
-            // Pad meters animate continuously
-            ctx.request_repaint();
+        editor_state,
+        RepaintNotifier::new(),
+        EguiNiceSettings::new(),
+        KlopferEditor {
+            params,
+            bank,
+            learn,
+            recorder,
+            executor,
+            gui: None,
+            state: EditorState::default(),
         },
     )
+}
+
+pub(crate) fn editor_state() -> Arc<EguiEditorState> {
+    EguiEditorState::from_size(LogicalSize::new(WIDTH as f32, HEIGHT as f32), 1.0)
+}
+
+impl NiceEguiApp for KlopferEditor {
+    fn build(
+        &mut self,
+        egui_ctx: egui::Context,
+        nice_gui_ctx: GuiContext,
+        _frame: &mut nice_plug_egui::Frame,
+    ) -> Result<(), nice_plug_egui::baseview::HandlerError> {
+        theme::apply(&egui_ctx);
+        self.gui = Some(nice_gui_ctx);
+        Ok(())
+    }
+
+    fn editor_closed(&mut self) {
+        self.gui = None;
+    }
+
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut nice_plug_egui::Frame) {
+        let Some(gui) = &self.gui else {
+            return;
+        };
+        let setter = gui.param_setter();
+        let ctx = ui.ctx().clone();
+        let state = &mut self.state;
+
+        self.bank.collect_garbage();
+        widgets::provide_learn(&ctx, &self.learn);
+
+        // Tell the host about values set by learned MIDI CCs
+        self.learn.take_pending(|ptr, value| {
+            // SAFETY: the pointer comes from our own parameter map
+            unsafe {
+                gui.raw_begin_set_parameter(ptr);
+                gui.raw_set_parameter_normalized(ptr, value);
+                gui.raw_end_set_parameter(ptr);
+            }
+        });
+
+        let c = Ctx {
+            params: &self.params,
+            bank: &self.bank,
+            recorder: &self.recorder,
+            executor: &self.executor,
+            setter: &setter,
+        };
+
+        if let Some(outcome) = state.dialogs.take_outcome() {
+            apply_dialog_outcome(&c, state, outcome);
+        }
+        rec_tab::collect_take(&c, state);
+        state.drop_zones.clear();
+
+        egui::Panel::top("top")
+            .exact_size(52.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::PANEL_DARK)
+                    .inner_margin(egui::Margin::symmetric(12, 6)),
+            )
+            .show(ui, |ui| top_bar(ui, &c, state));
+
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::BG)
+                    .inner_margin(egui::Margin::same(12)),
+            )
+            .show(ui, |ui| match state.view {
+                View::Pads => pads::pads_view(ui, &c, state),
+                View::Mixer => mixer::mixer_view(ui, &c, state),
+            });
+
+        drop::handle(&ctx, &c, state);
+
+        // Release a previewed pad when the mouse button goes up anywhere
+        if let Some(pad) = state.held_pad {
+            if !ctx.input(|i| i.pointer.primary_down()) {
+                let _ = self.bank.previews.push(Preview::Off { pad });
+                state.held_pad = None;
+            }
+        }
+
+        // Pad meters animate continuously
+        ctx.request_repaint();
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

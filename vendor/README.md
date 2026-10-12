@@ -1,31 +1,34 @@
 # Vendored dependencies
 
-Local copies of two GUI dependencies with small fixes for file drag and drop. They replace the git
-dependencies through `[patch]` in the workspace `Cargo.toml`. Every change is marked with
-`Klopfer patch` in the source.
+Local copies of crates.io dependencies with small fixes. They replace the published crates through
+`[patch.crates-io]` in the workspace `Cargo.toml`. Every change is marked with `Klopfer patch` in
+the source. The copies are the published packages as cargo unpacks them.
 
-| Crate | Upstream | Revision | License |
+| Crate | Version | Upstream | License |
 |---|---|---|---|
-| `baseview` | https://github.com/RustAudio/baseview | `9a0b42c09d712777b2edb4c5e0cb6baf21e988f0` | MIT / Apache-2.0 |
-| `egui-baseview` | https://github.com/BillyDM/egui-baseview | `ec70c3fe6b2f070dcacbc22924431edbe24bd1c0` | MIT |
+| `nice-plug` | 0.4.2 | https://codeberg.org/RustAudio/nice-plug | ISC |
+| `baseview` | 0.3.7 | https://github.com/RustAudio/baseview | MIT / Apache-2.0 |
+| `egui-baseview` | 0.7.2 | https://codeberg.org/RustAudio/egui-baseview | MIT / Apache-2.0 |
 
 ## Changes
 
-- `baseview/src/macos/view.rs`: drag positions are converted from window to view coordinates, like
-  mouse events already were. Without this, drops land at the wrong spot whenever the plugin view is
-  embedded in a host window.
-- `baseview/src/win/drop_target.rs`: drag positions are converted from screen to client
-  coordinates (`ScreenToClient`) for the same reason.
-- `baseview/Cargo.toml`: allows the `unexpected_cfgs` lint the `objc` macros trigger; cargo capped
-  it while this was a git dependency.
+- `nice-plug/src/wrapper/clap/wrapper.rs` (`ext_render_set`): a render mode change only stores the
+  mode, like NIH-plug did. nice-plug requests a restart when the host switches to offline rendering
+  while the plugin is active; REAPER handles that restart late, so the plugin is deactivated or
+  reset in the middle of the render, which cuts off or silences the rendered audio
+  (`tools/reaper-render-test.py` fails without this).
+- `baseview/src/platform/macos/view.rs`: drag positions are converted from window to view
+  coordinates, like mouse events already are. Without this, drops land at the wrong spot whenever
+  the plugin view is embedded in a host window. (Windows does this already since 0.3.)
 - `egui-baseview/src/window.rs`: forwards `DragEntered`/`DragMoved`/`DragLeft`/`DragDropped` as
   egui's `hovered_files`/`dropped_files` and accepts file drops.
-- `egui-baseview/Cargo.toml`: depends on the local `baseview`.
 
-`baseview` doesn't support drag and drop on Linux (X11), so dropping files has no effect there.
+## Not patched, worked around in Klopfer
 
-nih-plug's standalone wrapper pins a different `baseview` revision (`579130ec`); the patch replaces
-it with this copy as well, which builds and runs fine.
+- nice-plug doesn't reactivate the plugin after loading a state (NIH-plug did). Klopfer notices
+  loaded states through `Tracked` fields (`src/params.rs`) and applies them in `process()`.
+- nice-plug's JACK backend initializes the plugin with the `--sample-rate` option instead of the
+  server's rate. The standalone (`src/main.rs`) passes the server's rate.
 
-When updating nih-plug, check whether these revisions changed and re-apply the patches, or drop
-them once upstream handles drag and drop.
+When updating these crates, copy the new published version (from `~/.cargo/registry/src`), re-apply
+the patches, and drop each one once upstream fixes it.

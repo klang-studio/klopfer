@@ -242,7 +242,7 @@ fn main() {
         Pad::new("Loop").layer("loop-120.wav", drum_loop(snare(32, 1.0)), 0.3, (1, 127)),
     ];
 
-    // Same layout as nih-plug's PluginState: fields hold JSON encoded values, parameter IDs of
+    // Same layout as nice-plug's PluginState: fields hold JSON encoded values, parameter IDs of
     // pad parameters end in the pad number
     let mut fields = serde_json::Map::new();
     let mut params = serde_json::Map::new();

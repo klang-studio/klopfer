@@ -3,8 +3,8 @@
 use std::sync::atomic::Ordering;
 
 use klopfer_dsp::{slot_index, NUM_LAYERS, PADS_PER_BANK};
-use nih_plug::prelude::*;
-use nih_plug_egui::egui::{
+use nice_plug::prelude::*;
+use egui::{
     self, pos2, vec2, Align, Align2, Color32, CornerRadius, Layout, Rect, RichText, Sense, Stroke,
     StrokeKind, Ui,
 };
@@ -79,11 +79,11 @@ fn pad_grid(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
         response.context_menu(|ui| {
             if ui.button("Load sample…").clicked() {
                 pick_sample(state, pad, 0, true);
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("Clear").clicked() {
                 clear_pad(c, pad);
-                ui.close_menu();
+                ui.close();
             }
         });
 

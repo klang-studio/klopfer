@@ -1,39 +1,52 @@
 use cpal::traits::{DeviceTrait, HostTrait};
 use klopfer::Klopfer;
-use nih_plug::prelude::*;
+use nice_plug::prelude::*;
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
-    if let Some(rate) = device_sample_rate(&args) {
-        eprintln!("Using the output device's sample rate of {rate} Hz");
+    if let Some((rate, source)) = sample_rate(&args) {
+        eprintln!("Using the {source}'s sample rate of {rate} Hz");
         args.extend(["--sample-rate".to_owned(), rate.to_string()]);
     }
-    nih_export_standalone_with_args::<Klopfer, _>(args);
+    nice_export_standalone_with_args::<Klopfer, _>(args);
 }
 
-/// nih-plug's CoreAudio/WASAPI backend aborts when the device runs at a different rate than the
-/// requested one (48 kHz by default), so match the device unless a rate was given explicitly.
-fn device_sample_rate(args: &[String]) -> Option<u32> {
+/// The sample rate to initialize the plugin with, unless one was given explicitly.
+///
+/// nice-plug's CoreAudio/WASAPI backend aborts when the device runs at a different rate than the
+/// requested one (48 kHz by default). Its JACK backend runs at the server's rate but still
+/// initializes the plugin with the requested one, which detunes everything.
+fn sample_rate(args: &[String]) -> Option<(u32, &'static str)> {
     if arg_value(args, "-r", "--sample-rate").is_some() {
         return None;
     }
-    // These backends ignore the sample rate option
-    if matches!(
-        arg_value(args, "-b", "--backend").as_deref(),
-        Some("jack" | "dummy")
-    ) {
-        return None;
+    let jack = || jack_sample_rate().map(|rate| (rate, "JACK server"));
+    let device = || device_sample_rate(args).map(|rate| (rate, "output device"));
+    match arg_value(args, "-b", "--backend").as_deref() {
+        Some("dummy") => None,
+        Some("jack") => jack(),
+        // Auto tries JACK first
+        None | Some("auto") => jack().or_else(device),
+        Some(_) => device(),
     }
+}
 
+fn jack_sample_rate() -> Option<u32> {
+    let (client, _) =
+        jack::Client::new("klopfer-probe", jack::ClientOptions::NO_START_SERVER).ok()?;
+    Some(client.sample_rate())
+}
+
+fn device_sample_rate(args: &[String]) -> Option<u32> {
     let host = cpal::default_host();
     let device = match arg_value(args, "", "--output-device") {
         Some(name) => host
             .output_devices()
             .ok()?
-            .find(|d| d.name().is_ok_and(|n| n == name))?,
+            .find(|d| d.description().is_ok_and(|d| d.name() == name))?,
         None => host.default_output_device()?,
     };
-    Some(device.default_output_config().ok()?.sample_rate().0)
+    Some(device.default_output_config().ok()?.sample_rate())
 }
 
 /// Finds an option's value in the forms `-x value`, `-xvalue`, `--long value` and `--long=value`.

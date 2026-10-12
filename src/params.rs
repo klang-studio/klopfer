@@ -4,9 +4,11 @@ use klopfer_dsp::modulation::NUM_SLOTS;
 use klopfer_dsp::{
     EnvParams, FilterMode, LfoShape, ModSlot, ModSource, ModTarget, NUM_OUTPUTS, NUM_PADS,
 };
-use nih_plug::prelude::*;
-use nih_plug_egui::EguiState;
+use nice_plug::prelude::*;
+use nice_plug::params::persist::PersistentField;
 use parking_lot::RwLock;
+use std::ops::Deref;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::layers::LayerConfig;
@@ -27,17 +29,59 @@ pub fn note_name(note: i32) -> String {
     )
 }
 
+/// A persistent field that counts the times a loaded state set it. nih-plug reinitialized the
+/// plugin after loading a state, nice-plug doesn't, so the audio thread watches this count to
+/// apply loaded states. The plugin's own writes through [`RwLock`] don't count.
+pub struct Tracked<T> {
+    value: RwLock<T>,
+    state_gen: Arc<AtomicU64>,
+}
+
+impl<T> Tracked<T> {
+    fn new(value: T, state_gen: &Arc<AtomicU64>) -> Self {
+        Self {
+            value: RwLock::new(value),
+            state_gen: state_gen.clone(),
+        }
+    }
+}
+
+impl<T> Deref for Tracked<T> {
+    type Target = RwLock<T>;
+
+    fn deref(&self) -> &RwLock<T> {
+        &self.value
+    }
+}
+
+impl<'a, T> PersistentField<'a, T> for Tracked<T>
+where
+    T: serde::Serialize + serde::Deserialize<'a> + Send + Sync,
+{
+    fn set(&self, new_value: T) {
+        *self.value.write() = new_value;
+        self.state_gen.fetch_add(1, Ordering::Release);
+    }
+
+    fn map<F, R>(&self, f: F) -> R
+    where
+        F: Fn(&T) -> R,
+    {
+        f(&self.value.read())
+    }
+}
+
 #[derive(Params)]
 pub struct KlopferParams {
-    #[persist = "editor-state"]
-    pub editor_state: Arc<EguiState>,
+    /// Incremented by every [`Tracked`] field a loaded state sets
+    pub state_gen: Arc<AtomicU64>,
 
     #[persist = "kit-name"]
     pub kit_name: RwLock<String>,
 
     /// MIDI learn assignments as `(cc, parameter id)`
     #[persist = "midi-map"]
-    pub midi_map: RwLock<Vec<(u8, String)>>,
+    pub midi_map: Tracked<Vec<(u8, String)>>,
 
     #[id = "master"]
     pub master: FloatParam,
@@ -49,10 +93,10 @@ pub struct KlopferParams {
 
 impl Default for KlopferParams {
     fn default() -> Self {
+        let state_gen = Arc::new(AtomicU64::new(0));
         Self {
-            editor_state: EguiState::from_size(crate::editor::WIDTH, crate::editor::HEIGHT),
             kit_name: RwLock::new(String::from("Init")),
-            midi_map: RwLock::new(Vec::new()),
+            midi_map: Tracked::new(Vec::new(), &state_gen),
             master: FloatParam::new(
                 "Master",
                 util::db_to_gain(0.0),
@@ -65,7 +109,10 @@ impl Default for KlopferParams {
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_gain_to_db(1))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
-            pads: (0..NUM_PADS).map(PadParams::new).collect(),
+            pads: (0..NUM_PADS)
+                .map(|pad| PadParams::new(pad, &state_gen))
+                .collect(),
+            state_gen,
         }
     }
 }
@@ -450,10 +497,10 @@ impl EnvelopeParams<'_> {
 pub struct PadParams {
     /// Single-sample path from before layers existed, migrated into `layers` on load
     #[persist = "path"]
-    pub sample_path: RwLock<Option<String>>,
+    pub sample_path: Tracked<Option<String>>,
     /// Samples, velocity ranges and layer mode
     #[persist = "layers"]
-    pub layers: RwLock<LayerConfig>,
+    pub layers: Tracked<LayerConfig>,
     /// Display name, defaults to the file name
     #[persist = "name"]
     pub name: RwLock<String>,
@@ -602,12 +649,12 @@ fn percent_param(name: String, default: f32) -> FloatParam {
 }
 
 impl PadParams {
-    pub fn new(index: usize) -> Self {
+    pub fn new(index: usize, state_gen: &Arc<AtomicU64>) -> Self {
         let n = |s: &str| format!("P{} {s}", index + 1);
 
         Self {
-            sample_path: RwLock::new(None),
-            layers: RwLock::new(LayerConfig::default()),
+            sample_path: Tracked::new(None, state_gen),
+            layers: Tracked::new(LayerConfig::default(), state_gen),
             name: RwLock::new(String::new()),
 
             note: IntParam::new(

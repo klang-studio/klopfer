@@ -10,24 +10,25 @@ pub(crate) fn translate_mouse_button(button: baseview::MouseButton) -> Option<eg
 pub(crate) fn translate_virtual_key(key: &keyboard_types::Key) -> Option<egui::Key> {
     use egui::Key;
     use keyboard_types::Key as K;
+    use keyboard_types::NamedKey;
 
     Some(match key {
-        K::ArrowDown => Key::ArrowDown,
-        K::ArrowLeft => Key::ArrowLeft,
-        K::ArrowRight => Key::ArrowRight,
-        K::ArrowUp => Key::ArrowUp,
+        K::Named(NamedKey::ArrowDown) => Key::ArrowDown,
+        K::Named(NamedKey::ArrowLeft) => Key::ArrowLeft,
+        K::Named(NamedKey::ArrowRight) => Key::ArrowRight,
+        K::Named(NamedKey::ArrowUp) => Key::ArrowUp,
 
-        K::Escape => Key::Escape,
-        K::Tab => Key::Tab,
-        K::Backspace => Key::Backspace,
-        K::Enter => Key::Enter,
+        K::Named(NamedKey::Escape) => Key::Escape,
+        K::Named(NamedKey::Tab) => Key::Tab,
+        K::Named(NamedKey::Backspace) => Key::Backspace,
+        K::Named(NamedKey::Enter) => Key::Enter,
 
-        K::Insert => Key::Insert,
-        K::Delete => Key::Delete,
-        K::Home => Key::Home,
-        K::End => Key::End,
-        K::PageUp => Key::PageUp,
-        K::PageDown => Key::PageDown,
+        K::Named(NamedKey::Insert) => Key::Insert,
+        K::Named(NamedKey::Delete) => Key::Delete,
+        K::Named(NamedKey::Home) => Key::Home,
+        K::Named(NamedKey::End) => Key::End,
+        K::Named(NamedKey::PageUp) => Key::PageUp,
+        K::Named(NamedKey::PageDown) => Key::PageDown,
 
         K::Character(s) => match s.chars().next()? {
             ' ' => Key::Space,

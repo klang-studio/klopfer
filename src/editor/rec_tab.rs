@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use nih_plug_egui::egui::{self, pos2, vec2, CornerRadius, Rect, RichText, Sense, Stroke, Ui};
+use egui::{self, pos2, vec2, CornerRadius, Rect, RichText, Sense, Stroke, Ui};
 
 use super::dialogs::Request;
 use super::{assign_sample, theme, Ctx, EditorState};

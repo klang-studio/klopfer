@@ -11,8 +11,10 @@ use klopfer_dsp::{
     slot_index, Engine, PadLayers, PadSettings, Sample, SampleSource, NUM_LAYERS, NUM_OUTPUTS,
     NUM_PADS,
 };
-use nih_plug::prelude::*;
-use nih_plug::util::permit_alloc;
+use nice_plug::prelude::*;
+use nice_plug::midi::Key;
+use nice_plug::util::permit_alloc;
+use nice_plug_egui::EguiEditorState;
 
 mod bank;
 mod editor;
@@ -88,6 +90,9 @@ pub enum Task {
 
 pub struct Klopfer {
     params: Arc<KlopferParams>,
+    editor_state: Arc<EguiEditorState>,
+    /// The [`KlopferParams::state_gen`] last applied
+    state_gen: u64,
     bank: Arc<SampleBank>,
     learn: Arc<MidiLearn>,
     recorder: Arc<Recorder>,
@@ -125,7 +130,7 @@ fn preload_dev_kit(params: &KlopferParams) {
                 *params.pads[pad].name.write() = name;
             }
         }
-        Err(e) => nih_error!("Cannot load KLOPFER_KIT: {e}"),
+        Err(e) => nice_error!("Cannot load KLOPFER_KIT: {e}"),
     }
 }
 
@@ -141,6 +146,8 @@ impl Default for Klopfer {
 
         Self {
             params,
+            editor_state: editor::editor_state(),
+            state_gen: 0,
             bank: Arc::new(SampleBank::default()),
             learn,
             recorder: Arc::new(Recorder::default()),
@@ -309,6 +316,7 @@ impl Plugin for Klopfer {
     const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
 
+    type Editor = nice_plug_egui::EguiEditor<editor::KlopferEditor>;
     type SysExMessage = ();
     type BackgroundTask = Task;
 
@@ -331,8 +339,9 @@ impl Plugin for Klopfer {
         self.params.clone()
     }
 
-    fn editor(&mut self, async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+    fn editor(&mut self, async_executor: AsyncExecutor<Self>) -> Option<Self::Editor> {
         editor::create(
+            self.editor_state.clone(),
             self.params.clone(),
             self.bank.clone(),
             self.learn.clone(),
@@ -341,11 +350,11 @@ impl Plugin for Klopfer {
         )
     }
 
-    fn initialize(
+    fn activate(
         &mut self,
         _audio_io_layout: &AudioIOLayout,
         buffer_config: &BufferConfig,
-        context: &mut impl InitContext<Self>,
+        context: &mut impl ActivateContext<Self>,
     ) -> bool {
         self.engine = Engine::new(buffer_config.sample_rate);
         self.recorder_audio
@@ -354,34 +363,10 @@ impl Plugin for Klopfer {
         self.master_coeff =
             (-1.0 / (MASTER_SMOOTHING_MS / 1000.0 * buffer_config.sample_rate)).exp();
 
-        self.learn.set_assignments(&self.params.midi_map.read());
         self.overrides.clear();
-
-        // Load samples synchronously so offline renders never start without them. This is a
-        // no-op for slots whose sample is already loaded.
-        for (pad, p) in self.params.pads.iter().enumerate() {
-            // States from before layers existed have a single sample path
-            if let Some(path) = p.sample_path.write().take() {
-                let mut layers = p.layers.write();
-                if layers.layers[0].path.is_none() {
-                    layers.layers[0].path = Some(path);
-                }
-            }
-
-            let paths: Vec<Option<String>> = p
-                .layers
-                .read()
-                .layers
-                .iter()
-                .map(|l| l.path.clone())
-                .collect();
-            for (layer, path) in paths.into_iter().enumerate().take(NUM_LAYERS) {
-                let slot = slot_index(pad, layer);
-                if self.bank.request(slot, path.clone()) {
-                    context.execute(Task::Load { slot, path });
-                }
-            }
-        }
+        // Load samples synchronously so offline renders never start without them
+        self.state_gen = self.params.state_gen.load(Ordering::Acquire);
+        sync_state(&self.params, &self.bank, &self.learn);
         let engine = &mut self.engine;
         self.bank
             .apply_swaps(&mut self.audio, |slot| engine.kill_slot(slot));
@@ -406,6 +391,16 @@ impl Plugin for Klopfer {
         aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        // A state was loaded while active. nih-plug reinitialized the plugin for that, nice-plug
+        // doesn't, so apply it here just as synchronously: renders must start with the samples.
+        // A no-op for samples the editor loaded already.
+        let state_loaded = self.params.state_gen.load(Ordering::Acquire) != self.state_gen;
+        if state_loaded {
+            self.state_gen = self.params.state_gen.load(Ordering::Acquire);
+            self.overrides.clear();
+            permit_alloc(|| sync_state(&self.params, &self.bank, &self.learn));
+        }
+
         let engine = &mut self.engine;
         self.bank
             .apply_swaps(&mut self.audio, |slot| engine.kill_slot(slot));
@@ -413,7 +408,7 @@ impl Plugin for Klopfer {
         let transport = TransportInfo::from_host(context.transport());
         self.update_settings(transport);
 
-        if self.process_mode == ProcessMode::Offline {
+        if self.process_mode == ProcessMode::Offline || state_loaded {
             // Offline renders can't wait for the background thread: render here and use the
             // result in this very block
             let bank = self.bank.clone();
@@ -474,9 +469,20 @@ impl Plugin for Klopfer {
                     break;
                 }
                 match event {
-                    NoteEvent::NoteOn { note, velocity, .. } => self.note_on(note, velocity),
-                    NoteEvent::NoteOff { note, .. } => self.note_off(note),
-                    NoteEvent::Choke { note, .. } => self.note_off(note),
+                    NoteEvent::NoteOn {
+                        key: Key::Number(note),
+                        velocity,
+                        ..
+                    } => self.note_on(note, velocity),
+                    NoteEvent::NoteOff { key, .. } => match key.number() {
+                        Some(note) => self.note_off(note),
+                        // Wildcards address all notes
+                        None => (0..128).for_each(|note| self.note_off(note)),
+                    },
+                    NoteEvent::Choke { key, .. } => match key.number() {
+                        Some(note) => self.note_off(note),
+                        None => self.engine.choke_all(),
+                    },
                     // All sound off / all notes off
                     NoteEvent::MidiCC { cc: 120 | 123, .. } => self.engine.choke_all(),
                     NoteEvent::MidiCC { cc, value, .. } => {
@@ -527,7 +533,7 @@ impl Plugin for Klopfer {
         }
 
         let peaks = self.engine.take_pad_peaks();
-        if self.params.editor_state.is_open() {
+        if self.editor_state.is_open() {
             let decay = self.meter_decay.powi(num_samples as i32);
             for (meter, peak) in self.bank.meters.iter().zip(peaks) {
                 let old = meter.load(Ordering::Relaxed);
@@ -561,5 +567,34 @@ impl Vst3Plugin for Klopfer {
     ];
 }
 
-nih_export_clap!(Klopfer);
-nih_export_vst3!(Klopfer);
+nice_export_clap!(Klopfer);
+nice_export_vst3!(Klopfer);
+
+/// Applies the loaded state: MIDI learn assignments, single-sample paths from old states, and the
+/// samples. Blocking; slots that already have their sample are skipped.
+fn sync_state(params: &KlopferParams, bank: &SampleBank, learn: &MidiLearn) {
+    learn.set_assignments(&params.midi_map.read());
+    for (pad, p) in params.pads.iter().enumerate() {
+        // States from before layers existed have a single sample path
+        if let Some(path) = p.sample_path.write().take() {
+            let mut layers = p.layers.write();
+            if layers.layers[0].path.is_none() {
+                layers.layers[0].path = Some(path);
+            }
+        }
+
+        let paths: Vec<Option<String>> = p
+            .layers
+            .read()
+            .layers
+            .iter()
+            .map(|l| l.path.clone())
+            .collect();
+        for (layer, path) in paths.into_iter().enumerate().take(NUM_LAYERS) {
+            let slot = slot_index(pad, layer);
+            if bank.request(slot, path.clone()) {
+                bank.load(slot, path);
+            }
+        }
+    }
+}

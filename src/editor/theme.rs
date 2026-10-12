@@ -1,6 +1,6 @@
 //! Colors and global style: dark hardware look with an orange accent.
 
-use nih_plug_egui::egui::{self, Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle};
+use egui::{self, Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle};
 
 pub const BG: Color32 = Color32::from_rgb(0x1e, 0x20, 0x24);
 pub const PANEL: Color32 = Color32::from_rgb(0x2a, 0x2d, 0x32);
@@ -40,7 +40,7 @@ pub fn heading() -> FontId {
 }
 
 pub fn apply(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style.visuals = egui::Visuals::dark();
     let v = &mut style.visuals;
     v.panel_fill = BG;
@@ -71,5 +71,5 @@ pub fn apply(ctx: &egui::Context) {
     style
         .text_styles
         .insert(TextStyle::Body, FontId::new(12.0, FontFamily::Proportional));
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }

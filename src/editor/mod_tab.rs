@@ -1,6 +1,6 @@
 //! Modulation: LFO, two modulation envelopes and the eight slot matrix.
 
-use nih_plug_egui::egui::{self, RichText, Ui};
+use egui::{self, RichText, Ui};
 
 use super::widgets::{amount_bar, choice, section, toggle, Knob};
 use super::{theme, Ctx};

@@ -9,4 +9,6 @@ pub enum OpenGlError {
     NoContext,
     #[error("Error occured when initializing painter: \n {0}")]
     CreatePainter(PainterError),
+    #[error("{0}")]
+    Baseview(#[from] baseview::Error),
 }

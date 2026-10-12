@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use klopfer_dsp::{NUM_LAYERS, NUM_PADS};
-use nih_plug_egui::egui::{self, Align2, CornerRadius, Rect, Stroke, StrokeKind};
+use egui::{self, Align2, CornerRadius, Rect, Stroke, StrokeKind};
 
 use super::dialogs::Outcome;
 use super::{apply_dialog_outcome, assign_sample, theme, Ctx, EditorState};
@@ -137,7 +137,7 @@ pub(super) fn handle(ctx: &egui::Context, c: &Ctx, state: &mut EditorState) {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| f.path.clone())
+                .map(|f| f.path().to_path_buf())
                 .collect::<Vec<_>>(),
             i.pointer.hover_pos(),
         )
@@ -146,7 +146,7 @@ pub(super) fn handle(ctx: &egui::Context, c: &Ctx, state: &mut EditorState) {
 
     if !hovered.is_empty() {
         match (plan(&hovered), zone) {
-            (Plan::Kit(_), _) => overlay(ctx, ctx.screen_rect().shrink(4.0), "Load kit"),
+            (Plan::Kit(_), _) => overlay(ctx, ctx.content_rect().shrink(4.0), "Load kit"),
             (Plan::Samples(s), Some((rect, target))) => {
                 overlay(ctx, rect, &describe(target, s.len()))
             }

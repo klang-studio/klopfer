@@ -1,7 +1,7 @@
 //! Waveform display with draggable start and end markers.
 
-use nih_plug::prelude::ParamSetter;
-use nih_plug_egui::egui::{self, pos2, vec2, Align2, CornerRadius, Rect, Sense, Stroke, Ui};
+use nice_plug::prelude::ParamSetter;
+use egui::{self, pos2, vec2, Align2, CornerRadius, Rect, Sense, Stroke, Ui};
 
 use super::theme;
 use crate::bank::PadStatus;
