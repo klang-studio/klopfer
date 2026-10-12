@@ -24,6 +24,11 @@ git submodule update --init      # after cloning Klopfer
 - `nice-plug`, crate manifests: `package.workspace = "../.."`. Without it, cargo resolves the
   inherited manifest fields against Klopfer's workspace and fails. All nice-plug crates come from
   the submodule so they share one `nice-plug-core`.
+- `baseview`, X11: embedded windows draw even when Present or MapNotify events go missing. In
+  REAPER (under XWayland) the first Present notification never arrives and the host's embedding
+  window counts as unmapped, so the plugin window stayed empty. Without an answer to the first
+  Present request, frames now come from the fallback timer, and an Expose of the plugin window
+  marks its whole ancestry as mapped.
 - `baseview`, macOS: drag positions are converted from window to view coordinates, like mouse
   events already are. Without this, drops land at the wrong spot whenever the plugin view is
   embedded in a host window. (Windows does this already since 0.3.)
