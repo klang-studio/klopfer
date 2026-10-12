@@ -1,0 +1,10 @@
+[package]
+name = "testkit"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Generates a synthetic drum kit for development"
+
+[dependencies]
+hound = "3.5.1"
+serde_json = "1.0.154"

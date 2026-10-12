@@ -1,0 +1,49 @@
+[workspace]
+members = [".", "dsp", "xtask", "tools/testkit"]
+resolver = "2"
+
+[package]
+name = "klopfer"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "A drum sampler plugin (VST3/CLAP)"
+
+[lib]
+# The lib artifact is needed for the standalone binary and for tests
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "klopfer_standalone"
+path = "src/main.rs"
+required-features = ["standalone"]
+
+[features]
+default = []
+standalone = ["nih_plug/standalone", "dep:cpal"]
+
+[dependencies]
+atomic_float = "1.1.0"
+# Only used by the standalone binary to pick the output device's sample rate
+cpal = { version = "0.15", optional = true }
+crossbeam-queue = "0.3.14"
+klopfer_dsp = { path = "dsp" }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683", features = ["assert_process_allocs"] }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683" }
+parking_lot = "0.12.5"
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+symphonia = { version = "0.6.1", default-features = false, features = ["wav", "aiff", "flac", "ogg", "vorbis", "mp3", "pcm"] }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"
+
+[dev-dependencies]
+hound = "3.5.1"
