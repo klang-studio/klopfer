@@ -56,8 +56,9 @@ pub fn load_sample(path: &Path) -> Result<Sample, String> {
         .map_err(|e| format!("unsupported codec: {e}"))?;
 
     let mut sample_rate = 0;
-    let mut channels = 0;
-    let mut interleaved: Vec<f32> = Vec::new();
+    let mut stereo: Option<bool> = None;
+    let mut left: Vec<f32> = Vec::new();
+    let mut right: Vec<f32> = Vec::new();
     let mut scratch: Vec<f32> = Vec::new();
 
     loop {
@@ -71,36 +72,43 @@ pub fn load_sample(path: &Path) -> Result<Sample, String> {
             continue;
         }
 
-        match decoder.decode(&packet) {
-            Ok(buf) => {
-                sample_rate = buf.spec().rate();
-                channels = buf.spec().channels().count();
-                scratch.resize(buf.samples_interleaved(), 0.0);
-                buf.copy_to_slice_interleaved(&mut scratch);
-                interleaved.extend_from_slice(&scratch);
-            }
+        let buf = match decoder.decode(&packet) {
+            Ok(buf) => buf,
             // Skip corrupt packets
             Err(Error::DecodeError(_)) => continue,
             Err(e) => return Err(format!("decode error: {e}")),
+        };
+        let channels = buf.spec().channels().count();
+        let frames = buf.frames();
+        if channels == 0 || frames == 0 {
+            continue;
+        }
+        // Check before buffering anything, and only ever keep two channels, so neither long
+        // files nor files with many channels can exhaust memory
+        if left.len() + frames > MAX_FRAMES {
+            return Err(String::from("file is too long"));
         }
 
-        if channels > 0 && interleaved.len() / channels > MAX_FRAMES {
-            return Err(String::from("file is too long"));
+        sample_rate = buf.spec().rate();
+        let is_stereo = *stereo.get_or_insert(channels >= 2);
+        scratch.resize(buf.samples_interleaved(), 0.0);
+        buf.copy_to_slice_interleaved(&mut scratch);
+        for frame in scratch.chunks_exact(channels) {
+            left.push(frame[0]);
+            if is_stereo {
+                right.push(*frame.get(1).unwrap_or(&frame[0]));
+            }
         }
     }
 
-    if channels == 0 || sample_rate == 0 || interleaved.is_empty() {
+    if sample_rate == 0 || left.is_empty() {
         return Err(String::from("file contains no audio"));
     }
 
-    let frames = interleaved.len() / channels;
-    let channel =
-        |c: usize| -> Vec<f32> { (0..frames).map(|i| interleaved[i * channels + c]).collect() };
-
-    Ok(if channels == 1 {
-        Sample::mono(sample_rate as f32, interleaved)
+    Ok(if stereo == Some(true) {
+        Sample::stereo(sample_rate as f32, left, right)
     } else {
-        Sample::stereo(sample_rate as f32, channel(0), channel(1))
+        Sample::mono(sample_rate as f32, left)
     })
 }
 
@@ -142,6 +150,20 @@ mod tests {
         let s = load_sample(&stereo).unwrap();
         assert_eq!(s.len(), 500);
         assert!(s.is_stereo());
+        assert!(s.left[10] > 0.0 && s.right.as_ref().unwrap()[10] < 0.0);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn keeps_first_two_of_many_channels() {
+        let dir = std::env::temp_dir().join(format!("klopfer-multi-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("eight.wav");
+        write_wav(&path, 8, 300);
+
+        let s = load_sample(&path).unwrap();
+        assert_eq!(s.len(), 300);
         assert!(s.left[10] > 0.0 && s.right.as_ref().unwrap()[10] < 0.0);
 
         std::fs::remove_dir_all(&dir).unwrap();

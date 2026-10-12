@@ -1,6 +1,7 @@
 //! Kit files: the plugin state as JSON, with sample paths stored relative to the kit file when the
 //! samples live next to it. That keeps kit folders portable between machines.
 
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 use klopfer_dsp::NUM_PADS;
@@ -33,6 +34,17 @@ fn kit_name(path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// UNC and other network paths. Merely checking whether such a file exists makes Windows connect
+/// to the server and send the user's credentials, so paths from kit files must never point there.
+fn is_network_path(path: &str) -> bool {
+    // Windows accepts any mix of separators, e.g. `/\server\share` is a UNC path as well
+    let norm = path.replace('/', "\\");
+    let local_verbatim = norm
+        .strip_prefix(r"\\?\")
+        .is_some_and(|rest| rest.as_bytes().get(1) == Some(&b':'));
+    norm.starts_with(r"\\") && !local_verbatim
 }
 
 /// Returns `path` relative to `base` using forward slashes, if it's inside `base`.
@@ -92,6 +104,15 @@ pub fn load(path: &Path) -> Result<PluginState, String> {
             set_path(&mut state, pad, None);
             continue;
         };
+        // Kits may come from anywhere: replace network paths by the file name next to the kit,
+        // without touching the network
+        if is_network_path(&p) {
+            let name = p.rsplit(['\\', '/']).next().unwrap_or_default();
+            let local = base.join(name).to_string_lossy().into_owned();
+            set_path(&mut state, pad, Some(local));
+            continue;
+        }
+
         let p = PathBuf::from(p);
         let resolved = if p.is_relative() {
             base.join(&p)
@@ -129,15 +150,34 @@ pub fn pad_names(state: &PluginState) -> [String; NUM_PADS] {
     })
 }
 
+/// Upper bound for directory entries visited by [`find_missing()`], so picking a huge folder
+/// (or the file system root) can't hang the editor.
+const MAX_SEARCH_ENTRIES: usize = 200_000;
+
 /// Searches `dir` recursively for files named like the missing samples. Returns `(pad, new path)`.
+/// Each directory is visited once, so symlink cycles terminate.
 pub fn find_missing(missing: &[(usize, String)], dir: &Path) -> Vec<(usize, String)> {
     let mut found = Vec::new();
+    let mut visited = HashSet::new();
     let mut stack = vec![dir.to_path_buf()];
+    let mut budget = MAX_SEARCH_ENTRIES;
+
     while let Some(d) = stack.pop() {
+        let Ok(real) = d.canonicalize() else {
+            continue;
+        };
+        if !visited.insert(real) {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&d) else {
             continue;
         };
         for entry in entries.flatten() {
+            if budget == 0 || found.len() == missing.len() {
+                return found;
+            }
+            budget -= 1;
+
             let p = entry.path();
             if p.is_dir() {
                 stack.push(p);
@@ -197,6 +237,56 @@ mod tests {
             find_missing(&[(5, String::from("/gone/kick.wav"))], &dir),
             vec![(5, kick.to_string_lossy().into_owned())]
         );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detects_network_paths() {
+        assert!(is_network_path(r"\\server\share\kick.wav"));
+        assert!(is_network_path(r"\\?\UNC\server\share\kick.wav"));
+        assert!(is_network_path("//server/share/kick.wav"));
+        assert!(is_network_path(r"/\server\share\kick.wav"));
+        assert!(is_network_path(r"\/server/share/kick.wav"));
+        assert!(is_network_path("//?/UNC/server/share/kick.wav"));
+        assert!(!is_network_path(r"\\?\C:\samples\kick.wav"));
+        assert!(!is_network_path("/Users/me/kick.wav"));
+        assert!(!is_network_path(r"C:\samples\kick.wav"));
+    }
+
+    #[test]
+    fn network_paths_in_kits_are_replaced() {
+        let dir = std::env::temp_dir().join(format!("klopfer-unc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let kit = dir.join("evil.klopfer");
+        let state = state_with_paths(&[(0, r"\\attacker\share\kick.wav")]);
+        std::fs::write(&kit, serde_json::to_string(&state).unwrap()).unwrap();
+
+        let loaded = load(&kit).unwrap();
+        let path = sample_paths(&loaded)[0].clone().unwrap();
+        assert_eq!(Path::new(&path), dir.join("kick.wav"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_search_survives_symlink_cycles() {
+        let dir = std::env::temp_dir().join(format!("klopfer-cycle-{}", std::process::id()));
+        let sub = dir.join("a");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::os::unix::fs::symlink(&dir, sub.join("loop")).unwrap();
+        std::fs::write(sub.join("snare.wav"), b"").unwrap();
+
+        let found = find_missing(
+            &[
+                (1, String::from("/old/snare.wav")),
+                (2, String::from("/old/gone.wav")),
+            ],
+            &dir,
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, 1);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
