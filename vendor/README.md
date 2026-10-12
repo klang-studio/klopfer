@@ -24,6 +24,9 @@ git submodule update --init      # after cloning Klopfer
 - `nice-plug`, crate manifests: `package.workspace = "../.."`. Without it, cargo resolves the
   inherited manifest fields against Klopfer's workspace and fails. All nice-plug crates come from
   the submodule so they share one `nice-plug-core`.
+- `nice-plug-egui`: stores the window's scale factor right after creating it. REAPER queries the
+  editor size before baseview reports the scale factor, got the size for a factor of 1 instead of
+  the desktop's (`Xft.dpi`), and cut the editor off on scaled desktops.
 - `baseview`, X11: embedded windows draw even when Present or MapNotify events go missing. In
   REAPER (under XWayland) the first Present notification never arrives and the host's embedding
   window counts as unmapped, so the plugin window stayed empty. Without an answer to the first
