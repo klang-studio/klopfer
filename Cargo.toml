@@ -26,9 +26,12 @@ standalone = ["nih_plug/standalone", "dep:cpal"]
 
 [dependencies]
 atomic_float = "1.1.0"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # Only used by the standalone binary to pick the output device's sample rate
 cpal = { version = "0.15", optional = true }
 crossbeam-queue = "0.3.14"
+dirs = { version = "7.0.0", default-features = false }
+hound = "3.5.1"
 klopfer_dsp = { path = "dsp" }
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683", features = ["assert_process_allocs"] }
 nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683" }
@@ -46,9 +49,6 @@ strip = "symbols"
 inherits = "release"
 debug = true
 strip = "none"
-
-[dev-dependencies]
-hound = "3.5.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = "0.3"

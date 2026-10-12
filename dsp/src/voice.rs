@@ -168,8 +168,7 @@ impl Voice {
 
         let mut x = sample.read(self.pos);
 
-        let pitch = s.tune
-            + self.layer_tune
+        let pitch = s.tune + self.layer_tune - sample.baked_pitch
             + s.pitch_env_semis * self.pitch_env.next(s.pitch_env_coeff)
             + m.pitch * PITCH_RANGE_SEMIS;
         let rate = (sample.sample_rate / sample_rate) as f64 * (pitch / 12.0).exp2() as f64;

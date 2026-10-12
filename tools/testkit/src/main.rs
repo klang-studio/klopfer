@@ -238,14 +238,37 @@ fn main() {
             .param("src_1", json!({ "string": "lfo" }))
             .param("dst_1", json!({ "string": "pitch" }))
             .param("amt_1", json!({ "f32": 0.08 })),
+        // A one bar loop at 120 BPM to try slicing and time stretching on
+        Pad::new("Loop").layer("loop-120.wav", drum_loop(snare(32, 1.0)), 0.3, (1, 127)),
     ];
 
     // Same layout as nih-plug's PluginState: fields hold JSON encoded values, parameter IDs of
     // pad parameters end in the pad number
     let mut fields = serde_json::Map::new();
     let mut params = serde_json::Map::new();
+    // The same kit as SFZ, to try the importer
+    let mut sfz = String::from("// Klopfer test kit\n<control> default_path=samples/\n");
     for (pad, def) in pads.into_iter().enumerate() {
         let n = pad + 1;
+        let key = 36 + pad;
+        sfz.push_str("<group> loop_mode=one_shot");
+        if def.mode == "RoundRobin" {
+            sfz.push_str(&format!(" seq_length={}", def.layers.len()));
+        }
+        if def.params.iter().any(|(id, _)| *id == "choke") {
+            sfz.push_str(" group=1 off_by=1");
+        }
+        sfz.push('\n');
+        for (i, (file, _, _, (lo, hi))) in def.layers.iter().enumerate() {
+            sfz.push_str(&format!(
+                "<region> sample={file} key={key} lovel={lo} hivel={hi}"
+            ));
+            if def.mode == "RoundRobin" {
+                sfz.push_str(&format!(" seq_position={}", i + 1));
+            }
+            sfz.push('\n');
+        }
+
         let mut layers = Vec::new();
         for (file, data, level, (lo, hi)) in def.layers {
             write(&samples_dir.join(file), &normalize(data, level));
@@ -271,4 +294,33 @@ fn main() {
     )
     .expect("cannot write kit");
     println!("Wrote {}", kit_path.display());
+
+    let sfz_path = out.join("Testkit.sfz");
+    std::fs::write(&sfz_path, sfz).expect("cannot write sfz");
+    println!("Wrote {}", sfz_path.display());
+}
+
+/// One bar of kick, snare and eighth note hats at 120 BPM (2 seconds).
+fn drum_loop(snare: Vec<f32>) -> Vec<f32> {
+    let beat = SR as usize / 2;
+    let mut out = vec![0.0f32; beat * 4];
+    let mut add = |at: usize, data: &[f32], gain: f32| {
+        for (i, x) in data.iter().enumerate() {
+            if let Some(o) = out.get_mut(at + i) {
+                *o += x * gain;
+            }
+        }
+    };
+    let kick = sweep(160.0, 45.0, 0.03, 0.2, 0.5);
+    for at in [0, beat * 3 / 2, beat * 2] {
+        add(at, &kick, 1.0);
+    }
+    for at in [beat, beat * 3] {
+        add(at, &snare, 0.7);
+    }
+    let hat = hiss(9, 0.03, 0.15, 0.95);
+    for e in 0..8 {
+        add(e * beat / 2, &hat, 0.35);
+    }
+    out
 }

@@ -173,4 +173,17 @@ mod tests {
     fn reports_missing_files() {
         assert!(load_sample(Path::new("/definitely/not/here.wav")).is_err());
     }
+
+    /// The test kit's loop has hits on every eighth note: slicing must find exactly those.
+    #[test]
+    fn slices_generated_test_loop() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("testkit-out/samples/loop-120.wav");
+        if !path.exists() {
+            return;
+        }
+        let loop_sample = load_sample(&path).unwrap();
+        let starts = klopfer_dsp::slicing::detect_transients(&loop_sample, 0.5, 0.05);
+        assert_eq!(starts.len(), 8, "{starts:?}");
+        assert!((klopfer_dsp::slicing::estimate_bpm(&loop_sample) - 120.0).abs() < 0.1);
+    }
 }

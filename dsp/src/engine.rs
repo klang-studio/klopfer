@@ -25,6 +25,25 @@ pub fn slot_index(pad: usize, layer: usize) -> usize {
     pad * NUM_LAYERS + layer
 }
 
+/// Where the engine gets the sample for a slot from.
+pub trait SampleSource {
+    fn sample(&self, slot: usize) -> Option<&Sample>;
+}
+
+impl SampleSource for [Option<Arc<Sample>>] {
+    #[inline]
+    fn sample(&self, slot: usize) -> Option<&Sample> {
+        self.get(slot).and_then(|s| s.as_deref())
+    }
+}
+
+impl SampleSource for Vec<Option<Arc<Sample>>> {
+    #[inline]
+    fn sample(&self, slot: usize) -> Option<&Sample> {
+        self.as_slice().sample(slot)
+    }
+}
+
 pub struct Engine {
     voices: [Voice; MAX_VOICES],
     sample_rate: f32,
@@ -79,17 +98,17 @@ impl Engine {
     }
 
     /// Plays `pad`, choosing its layers by velocity and layer mode.
-    pub fn note_on(
+    pub fn note_on<S: SampleSource + ?Sized>(
         &mut self,
         pad: usize,
         velocity: f32,
-        samples: &[Option<Arc<Sample>>],
+        samples: &S,
         settings: &[PadSettings],
         layers: &[PadLayers],
     ) {
         let mut pad_layers = layers[pad];
         for (layer, info) in pad_layers.layers.iter_mut().enumerate() {
-            info.loaded = info.loaded && samples[slot_index(pad, layer)].is_some();
+            info.loaded = info.loaded && samples.sample(slot_index(pad, layer)).is_some();
         }
         let play = select_layers(&pad_layers, velocity, &mut self.cursors[pad], &mut self.rng);
         if !play.iter().any(|p| *p) {
@@ -110,7 +129,7 @@ impl Engine {
                 continue;
             }
             let slot = slot_index(pad, layer);
-            let Some(sample) = samples[slot].as_deref() else {
+            let Some(sample) = samples.sample(slot) else {
                 continue;
             };
 
@@ -168,14 +187,14 @@ impl Engine {
 
     /// Renders one frame and adds it to the output buses.
     #[inline]
-    pub fn render_frame(
+    pub fn render_frame<S: SampleSource + ?Sized>(
         &mut self,
-        samples: &[Option<Arc<Sample>>],
+        samples: &S,
         settings: &[PadSettings],
         bus: &mut [[f32; 2]; NUM_OUTPUTS],
     ) {
         for v in self.voices.iter_mut().filter(|v| v.active) {
-            let Some(sample) = samples.get(v.slot).and_then(|s| s.as_deref()) else {
+            let Some(sample) = samples.sample(v.slot) else {
                 v.active = false;
                 continue;
             };

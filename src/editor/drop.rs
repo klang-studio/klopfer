@@ -47,8 +47,9 @@ enum Plan {
 
 fn plan(paths: &[PathBuf]) -> Plan {
     if let Some(kit) = paths.iter().find(|p| {
-        p.extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case(kit::EXTENSION))
+        p.extension().is_some_and(|e| {
+            e.eq_ignore_ascii_case(kit::EXTENSION) || e.eq_ignore_ascii_case("sfz")
+        })
     }) {
         return Plan::Kit(kit.clone());
     }

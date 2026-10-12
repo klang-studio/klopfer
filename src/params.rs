@@ -306,6 +306,74 @@ impl From<ModTargetParam> for ModTarget {
     }
 }
 
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StretchModeParam {
+    #[name = "Off"]
+    #[id = "off"]
+    Off,
+    #[name = "Smooth"]
+    #[id = "smooth"]
+    Smooth,
+    #[name = "Cycle"]
+    #[id = "cycle"]
+    Cycle,
+}
+
+impl StretchModeParam {
+    pub fn to_dsp(self) -> Option<klopfer_dsp::stretch::StretchMode> {
+        match self {
+            StretchModeParam::Off => None,
+            StretchModeParam::Smooth => Some(klopfer_dsp::stretch::StretchMode::Smooth),
+            StretchModeParam::Cycle => Some(klopfer_dsp::stretch::StretchMode::Cycle),
+        }
+    }
+}
+
+/// Target lengths for tempo-synced time stretching.
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StretchBeats {
+    #[name = "1/16"]
+    #[id = "sixteenth"]
+    Sixteenth,
+    #[name = "1/8"]
+    #[id = "eighth"]
+    Eighth,
+    #[name = "1/4"]
+    #[id = "quarter"]
+    Quarter,
+    #[name = "1/2"]
+    #[id = "half"]
+    Half,
+    #[name = "1 Bar"]
+    #[id = "bar1"]
+    Bar1,
+    #[name = "2 Bars"]
+    #[id = "bar2"]
+    Bar2,
+    #[name = "4 Bars"]
+    #[id = "bar4"]
+    Bar4,
+    #[name = "8 Bars"]
+    #[id = "bar8"]
+    Bar8,
+}
+
+impl StretchBeats {
+    /// Length in quarter notes.
+    pub fn beats(self) -> f64 {
+        match self {
+            StretchBeats::Sixteenth => 0.25,
+            StretchBeats::Eighth => 0.5,
+            StretchBeats::Quarter => 1.0,
+            StretchBeats::Half => 2.0,
+            StretchBeats::Bar1 => 4.0,
+            StretchBeats::Bar2 => 8.0,
+            StretchBeats::Bar4 => 16.0,
+            StretchBeats::Bar8 => 32.0,
+        }
+    }
+}
+
 impl From<FilterType> for FilterMode {
     fn from(t: FilterType) -> Self {
         match t {
@@ -494,6 +562,16 @@ pub struct PadParams {
 
     #[nested(array, group = "Mod Slot")]
     pub slots: [ModSlotParams; NUM_SLOTS],
+
+    /// Time stretching re-renders the samples in the background, so these aren't automatable
+    #[id = "strmode"]
+    pub stretch_mode: EnumParam<StretchModeParam>,
+    #[id = "strlen"]
+    pub stretch_length: FloatParam,
+    #[id = "strsync"]
+    pub stretch_sync: BoolParam,
+    #[id = "strbeats"]
+    pub stretch_beats: EnumParam<StretchBeats>,
 }
 
 fn time_param(name: String, default_ms: f32, max_ms: f32) -> FloatParam {
@@ -747,6 +825,24 @@ impl PadParams {
             env2_release: time_param(n("Mod Env 2 Release"), 200.0, 10000.0),
 
             slots: std::array::from_fn(|slot| ModSlotParams::new(index, slot)),
+
+            stretch_mode: EnumParam::new(n("Stretch"), StretchModeParam::Off).non_automatable(),
+            stretch_length: FloatParam::new(
+                n("Stretch Length"),
+                1.0,
+                FloatRange::Skewed {
+                    min: 0.25,
+                    max: 4.0,
+                    factor: FloatRange::skew_factor(-1.0),
+                },
+            )
+            .with_step_size(0.01)
+            .with_unit("%")
+            .with_value_to_string(formatters::v2s_f32_percentage(0))
+            .with_string_to_value(formatters::s2v_f32_percentage())
+            .non_automatable(),
+            stretch_sync: BoolParam::new(n("Stretch Sync"), false).non_automatable(),
+            stretch_beats: EnumParam::new(n("Stretch Beats"), StretchBeats::Bar1).non_automatable(),
         }
     }
 
@@ -847,8 +943,8 @@ mod tests {
         ] {
             assert!(ids.iter().any(|i| i == id), "missing parameter id {id}");
         }
-        // 32 pads with 70 parameters each, plus master
-        assert_eq!(ids.len(), 32 * 70 + 1);
+        // 32 pads with 74 parameters each, plus master
+        assert_eq!(ids.len(), 32 * 74 + 1);
     }
 
     #[test]

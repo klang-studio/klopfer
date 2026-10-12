@@ -1,15 +1,17 @@
 //! Sample storage shared between the GUI, the background loader and the audio thread.
 //!
 //! Samples live in slots, one per pad layer (see [`klopfer_dsp::slot_index()`]). The audio thread
-//! owns its own `[Option<Arc<Sample>>; NUM_SAMPLE_SLOTS]`. New samples reach it through a
-//! lock-free queue, and replaced samples travel back through a second queue so they're never
-//! deallocated on the audio thread.
+//! owns its own copies in [`AudioSlots`]. New samples reach it through a lock-free queue, and
+//! replaced samples travel back through a second queue so they're never deallocated on the audio
+//! thread. Time stretched versions are rendered in the background and travel the same way.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use atomic_float::AtomicF32;
 use crossbeam_queue::ArrayQueue;
+use klopfer_dsp::stretch::{stretch, StretchMode};
 use klopfer_dsp::{Sample, NUM_PADS, NUM_SAMPLE_SLOTS};
 use parking_lot::RwLock;
 
@@ -39,6 +41,52 @@ pub struct PadSlot {
     pub peaks: Arc<Vec<(f32, f32)>>,
 }
 
+/// Identifies a time stretched rendering: re-rendered whenever any of this changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StretchKey {
+    pub mode: StretchMode,
+    /// Length factor in thousandths
+    pub ratio_milli: u32,
+    /// Pitch shift in cents
+    pub pitch_cents: i32,
+}
+
+impl StretchKey {
+    pub fn new(mode: StretchMode, ratio: f32, pitch_semis: f32) -> Self {
+        Self {
+            mode,
+            ratio_milli: (ratio.clamp(0.05, 20.0) * 1000.0).round() as u32,
+            pitch_cents: (pitch_semis * 100.0).round() as i32,
+        }
+    }
+}
+
+enum SlotUpdate {
+    Original(usize, Option<Arc<Sample>>),
+    Stretched(usize, StretchKey, Arc<Sample>),
+}
+
+/// The audio thread's samples. Only the audio thread (or `initialize()`) touches these.
+pub struct AudioSlots {
+    pub originals: Vec<Option<Arc<Sample>>>,
+    pub stretched: Vec<Option<Arc<Sample>>>,
+    /// Key of the installed stretched sample
+    pub stretch_keys: Vec<Option<StretchKey>>,
+    /// Key of the last requested rendering, to request each change only once
+    pub stretch_requested: Vec<Option<StretchKey>>,
+}
+
+impl Default for AudioSlots {
+    fn default() -> Self {
+        Self {
+            originals: vec![None; NUM_SAMPLE_SLOTS],
+            stretched: vec![None; NUM_SAMPLE_SLOTS],
+            stretch_keys: vec![None; NUM_SAMPLE_SLOTS],
+            stretch_requested: vec![None; NUM_SAMPLE_SLOTS],
+        }
+    }
+}
+
 /// A pad preview triggered from the GUI.
 #[derive(Debug, Clone, Copy)]
 pub enum Preview {
@@ -48,7 +96,11 @@ pub enum Preview {
 
 pub struct SampleBank {
     pub slots: Vec<RwLock<PadSlot>>,
-    to_audio: ArrayQueue<(usize, Option<Arc<Sample>>)>,
+    to_audio: ArrayQueue<SlotUpdate>,
+    /// Incremented for every stretch request; renderings for older generations are dropped
+    stretch_gen: Vec<AtomicU64>,
+    /// Whether a stretch rendering for the slot is on its way, for the GUI
+    pub stretching: Vec<AtomicBool>,
     garbage: ArrayQueue<Arc<Sample>>,
     /// GUI → audio thread
     pub previews: ArrayQueue<Preview>,
@@ -63,6 +115,10 @@ impl Default for SampleBank {
                 .map(|_| RwLock::new(PadSlot::default()))
                 .collect(),
             to_audio: ArrayQueue::new(QUEUE_SIZE),
+            stretch_gen: (0..NUM_SAMPLE_SLOTS).map(|_| AtomicU64::new(0)).collect(),
+            stretching: (0..NUM_SAMPLE_SLOTS)
+                .map(|_| AtomicBool::new(false))
+                .collect(),
             garbage: ArrayQueue::new(QUEUE_SIZE),
             previews: ArrayQueue::new(QUEUE_SIZE),
             meters: std::array::from_fn(|_| AtomicF32::new(0.0)),
@@ -121,7 +177,10 @@ impl SampleBank {
             slot.status = status;
         }
 
-        let mut msg = (index, sample);
+        self.send(SlotUpdate::Original(index, sample));
+    }
+
+    fn send(&self, mut msg: SlotUpdate) {
         // The audio thread drains this every block, so this only spins when no audio is running
         for _ in 0..100 {
             match self.to_audio.push(msg) {
@@ -139,18 +198,64 @@ impl SampleBank {
         while self.garbage.pop().is_some() {}
     }
 
-    /// Audio thread: applies pending sample swaps to `slots`. `on_swap` is called with the slot
-    /// index before its sample changes. Never allocates or deallocates.
-    pub fn apply_swaps(&self, slots: &mut [Option<Arc<Sample>>], mut on_swap: impl FnMut(usize)) {
-        // Only take new samples while the old ones can be handed back
-        while self.garbage.len() < self.garbage.capacity() {
-            let Some((index, sample)) = self.to_audio.pop() else {
+    /// Audio thread: marks a new stretch request for `slot` and returns its generation.
+    pub fn next_stretch_gen(&self, slot: usize) -> u64 {
+        self.stretching[slot].store(true, Ordering::Release);
+        self.stretch_gen[slot].fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Renders the time stretched version of `slot`. Blocking, call from a background thread.
+    /// Does nothing if a newer request came in, and gives up midway when one does.
+    pub fn render_stretch(&self, slot: usize, key: StretchKey, generation: u64) {
+        self.collect_garbage();
+        let current = || self.stretch_gen[slot].load(Ordering::Acquire);
+        if current() != generation {
+            return;
+        }
+        let Some(original) = self.slots[slot].read().sample.clone() else {
+            self.stretching[slot].store(false, Ordering::Release);
+            return;
+        };
+
+        let ratio = key.ratio_milli as f32 / 1000.0;
+        let pitch = key.pitch_cents as f32 / 100.0;
+        let cancelled = || current() != generation;
+        if let Some(stretched) = stretch(&original, ratio, pitch, key.mode, &cancelled) {
+            if current() == generation {
+                self.send(SlotUpdate::Stretched(slot, key, Arc::new(stretched)));
+                self.stretching[slot].store(false, Ordering::Release);
+            }
+        }
+    }
+
+    /// Audio thread: applies pending sample swaps. `on_swap` is called with the slot index before
+    /// its sample changes. Never allocates or deallocates.
+    pub fn apply_swaps(&self, audio: &mut AudioSlots, mut on_swap: impl FnMut(usize)) {
+        // Each update hands back at most two samples; only take one while they fit
+        while self.garbage.len() + 2 <= self.garbage.capacity() {
+            let Some(update) = self.to_audio.pop() else {
                 break;
             };
-            on_swap(index);
-            if let Some(old) = std::mem::replace(&mut slots[index], sample) {
+            let old = match update {
+                SlotUpdate::Original(index, sample) => {
+                    on_swap(index);
+                    // A new original makes the stretched version stale
+                    audio.stretch_keys[index] = None;
+                    audio.stretch_requested[index] = None;
+                    [
+                        std::mem::replace(&mut audio.originals[index], sample),
+                        audio.stretched[index].take(),
+                    ]
+                }
+                SlotUpdate::Stretched(index, key, sample) => {
+                    on_swap(index);
+                    audio.stretch_keys[index] = Some(key);
+                    [audio.stretched[index].replace(sample), None]
+                }
+            };
+            for sample in old.into_iter().flatten() {
                 // Can't fail, we checked for room and we're the only producer
-                let _ = self.garbage.push(old);
+                let _ = self.garbage.push(sample);
             }
         }
     }
@@ -163,7 +268,7 @@ mod tests {
     #[test]
     fn swaps_reach_audio_and_old_samples_come_back() {
         let bank = SampleBank::default();
-        let mut slots = vec![None; NUM_SAMPLE_SLOTS];
+        let mut slots = AudioSlots::default();
 
         bank.request(0, Some(String::from("a")));
         bank.install(
@@ -173,13 +278,13 @@ mod tests {
             PadStatus::Loaded,
         );
         bank.apply_swaps(&mut slots, |_| {});
-        assert!(slots[0].is_some());
+        assert!(slots.originals[0].is_some());
 
         bank.request(0, None);
         bank.install(0, None, None, PadStatus::Empty);
         let mut swapped = vec![];
         bank.apply_swaps(&mut slots, |p| swapped.push(p));
-        assert!(slots[0].is_none());
+        assert!(slots.originals[0].is_none());
         assert_eq!(swapped, vec![0]);
         assert_eq!(bank.garbage.len(), 1);
     }
@@ -187,7 +292,7 @@ mod tests {
     #[test]
     fn stale_loads_are_dropped() {
         let bank = SampleBank::default();
-        let mut slots = vec![None; NUM_SAMPLE_SLOTS];
+        let mut slots = AudioSlots::default();
         bank.request(1, Some(String::from("new")));
         bank.install(
             1,
@@ -196,7 +301,7 @@ mod tests {
             PadStatus::Loaded,
         );
         bank.apply_swaps(&mut slots, |_| {});
-        assert!(slots[1].is_none());
+        assert!(slots.originals[1].is_none());
     }
 
     #[test]
@@ -207,5 +312,39 @@ mod tests {
         assert!(!bank.request(2, path.clone()));
         bank.load(2, path);
         assert_eq!(bank.slots[2].read().status, PadStatus::Missing);
+    }
+
+    #[test]
+    fn stretched_renderings_install_and_stale_ones_are_dropped() {
+        let bank = SampleBank::default();
+        let mut slots = AudioSlots::default();
+        bank.request(3, Some(String::from("a")));
+        bank.install(
+            3,
+            Some("a"),
+            Some(Sample::mono(48000.0, vec![0.1; 4800])),
+            PadStatus::Loaded,
+        );
+        bank.apply_swaps(&mut slots, |_| {});
+
+        let key = StretchKey::new(StretchMode::Smooth, 2.0, 0.0);
+        let stale = bank.next_stretch_gen(3);
+        let current = bank.next_stretch_gen(3);
+        bank.render_stretch(3, key, stale);
+        bank.apply_swaps(&mut slots, |_| {});
+        assert!(slots.stretched[3].is_none());
+
+        bank.render_stretch(3, key, current);
+        bank.apply_swaps(&mut slots, |_| {});
+        assert_eq!(slots.stretched[3].as_ref().unwrap().len(), 9600);
+        assert_eq!(slots.stretch_keys[3], Some(key));
+        assert!(!bank.stretching[3].load(Ordering::Acquire));
+
+        // A new original invalidates the stretched version
+        bank.request(3, None);
+        bank.install(3, None, None, PadStatus::Empty);
+        bank.apply_swaps(&mut slots, |_| {});
+        assert!(slots.stretched[3].is_none());
+        assert_eq!(slots.stretch_keys[3], None);
     }
 }

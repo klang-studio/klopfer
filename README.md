@@ -20,6 +20,17 @@ License: GPL-3.0-or-later (required by the VST3 bindings nih-plug uses).
   attack/decay
 - MIDI learn: right-click any knob, toggle or fader. Assignments are stored in the project, not in
   kits, and work while the editor is closed
+- Slicing (tab EDIT): transient detection or a beat grid with tempo guess; slices go onto pads
+  that share the file with their own start/end; export of the slice rhythm as a MIDI file
+- Time stretching (tab EDIT): Smooth (WSOLA) and Cycle (grainy, vintage sampler style) modes,
+  length in percent or synced to the host tempo; Tune then changes pitch without changing length.
+  Rendered in the background per layer, synchronously when the host renders offline
+- Recording (tab REC) from a stereo sidechain input into the selected pad layer, optionally
+  waiting for the signal and normalizing; saved as WAV to a configurable folder (default
+  `~/Documents/Klopfer/Recordings`, stored in the user config directory)
+- SFZ import via Load Kit or drag and drop: keys become pads, regions on a key become layers
+  (velocity, `seq_length` round robin, `lorand`/`hirand` random), `group`/`off_by` become choke
+  groups; volume, pan, tune, transpose and the amp envelope are taken over
 - WAV, AIFF, FLAC, OGG and MP3 samples, decoded on a background thread
 - Drag and drop from Finder/Explorer: onto a pad (several files fill the following pads), onto the
   waveform or a layer row (several files fill the following layers), `.klopfer` files anywhere load
@@ -63,9 +74,9 @@ via XWayland.
 
 ```bash
 cargo test --workspace
-cargo run -p testkit -- testkit-out              # synthetic kit in testkit-out/
+cargo run -p testkit -- testkit-out              # synthetic kit (+ SFZ and a loop) in testkit-out/
 python3 tools/reaper-render-test.py              # needs REAPER and the installed CLAP:
-                                                 # groove from the test kit, MIDI learn in the host
+                                                 # groove, MIDI learn and offline time stretch
 ```
 
 Standalone with the test kit preloaded (`KLOPFER_KIT` only works in the standalone build):
@@ -75,7 +86,7 @@ cargo build --release --features standalone --bin klopfer_standalone
 KLOPFER_KIT=$PWD/testkit-out/Testkit.klopfer ./target/release/klopfer_standalone -b core-audio -l 2
 ```
 
-`KLOPFER_EDITOR=pad=13,tab=mod` (also `tab=layers`, `view=mixer`) opens the standalone editor in
+`KLOPFER_EDITOR=pad=13,tab=mod` (also `tab=layers`, `tab=edit`, `tab=rec`, `view=mixer`) opens the standalone editor in
 a given state, e.g. for screenshots. `-l 2` selects the stereo layout. The standalone uses the output device's sample rate unless
 `-r` is given, because nih-plug's CoreAudio/WASAPI backend aborts on a sample rate mismatch. Use
 `-b dummy` for a GUI check without audio, `--midi-input "<device>"` for a MIDI keyboard.
@@ -83,9 +94,14 @@ a given state, e.g. for screenshots. `-l 2` selects the stereo layout. The stand
 ## Known limitations
 
 - Drag and drop needs the patched GUI dependencies in `vendor/` and doesn't work on Linux.
+- When a time stretched rendering finishes, voices still playing the old one of that layer stop.
+- SFZ: sample offsets, loops and opcodes not listed in `src/sfz.rs` are ignored; Battery and RX2
+  kits aren't supported (proprietary formats).
+- Recording needs audio routed to the sidechain input; takes are limited to 60 seconds.
 - macOS builds are only ad-hoc signed; distribution needs a Developer ID and notarization.
 - Loading a kit while the host is playing can cause a short dropout.
 
 ## Roadmap
 
-- Phase 5: slicing, recording, time stretch, SFZ import
+All planned phases are done. Ideas: Windows/Linux CI builds, macOS notarization, per-layer
+sample start/end, more SFZ opcodes.

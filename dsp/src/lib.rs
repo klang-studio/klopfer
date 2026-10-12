@@ -12,11 +12,14 @@ pub mod lofi;
 pub mod modulation;
 pub mod pad;
 pub mod sample;
+pub mod slicing;
+pub mod stretch;
 pub mod svf;
 mod voice;
 
 pub use engine::{
-    slot_index, Engine, MAX_VOICES, NUM_OUTPUTS, NUM_PADS, NUM_SAMPLE_SLOTS, PADS_PER_BANK,
+    slot_index, Engine, SampleSource, MAX_VOICES, NUM_OUTPUTS, NUM_PADS, NUM_SAMPLE_SLOTS,
+    PADS_PER_BANK,
 };
 pub use layers::{LayerInfo, LayerMode, PadLayers, NUM_LAYERS};
 pub use modulation::{LfoShape, ModSlot, ModSource, ModTarget};

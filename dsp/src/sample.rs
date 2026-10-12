@@ -8,6 +8,9 @@ pub struct Sample {
     pub sample_rate: f32,
     pub left: Vec<f32>,
     pub right: Option<Vec<f32>>,
+    /// Semitones this sample has been pitch shifted by offline (time stretch). Playback subtracts
+    /// it from the pad's tuning.
+    pub baked_pitch: f32,
 }
 
 impl Sample {
@@ -16,6 +19,7 @@ impl Sample {
             sample_rate,
             left: data,
             right: None,
+            baked_pitch: 0.0,
         }
     }
 
@@ -25,6 +29,7 @@ impl Sample {
             sample_rate,
             left,
             right: Some(right),
+            baked_pitch: 0.0,
         }
     }
 

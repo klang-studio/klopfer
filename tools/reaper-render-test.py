@@ -30,10 +30,11 @@ BPM = 120
 PPQ = 960
 
 
-def plugin_state(extra_fields: dict | None = None) -> str:
+def plugin_state(extra_fields: dict | None = None, extra_params: dict | None = None) -> str:
     """The kit as a base64 CLAP state chunk. nih-plug prefixes its JSON with a u64 LE length."""
     kit = json.load(open(KIT))
     kit["fields"].update(extra_fields or {})
+    kit["params"].update(extra_params or {})
     base = os.path.dirname(KIT)
     for key, value in kit["fields"].items():
         if key.startswith("layers_"):
@@ -197,13 +198,32 @@ def test_midi_learn(reaper: str) -> list[str]:
     return []
 
 
+def test_time_stretch(reaper: str) -> list[str]:
+    """The 2 s loop on pad 14, stretched to 200 %, rendered offline: it must sound for 4 s. Offline
+    renders stretch synchronously, so even the first note uses the stretched sample."""
+    events = list(hits([0], 36 + 13))
+    state = plugin_state(extra_params={"strmode_14": {"string": "smooth"}, "strlen_14": {"f32": 2.0}})
+    result = render(reaper, project("{OUT}", state, midi_block(events, 10)))
+    if result is None:
+        return ["time stretch: render failed"]
+    left, sr = result
+    late = rms(left[int(2.5 * sr) : int(3.8 * sr)])
+    after = rms(left[int(4.3 * sr) : int(4.8 * sr)])
+    print(f"time stretch: rms 2.5-3.8 s {late:.4f}, after 4.3 s {after:.5f}")
+    if late < 0.005:
+        return ["time stretch: the loop doesn't play beyond its original length"]
+    if after > late / 10:
+        return ["time stretch: the stretched loop is longer than expected"]
+    return []
+
+
 def main() -> int:
     reaper = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_REAPER
     if not os.path.exists(KIT):
         print("Test kit missing, run: cargo run -p testkit -- testkit-out")
         return 1
 
-    failures = test_groove(reaper) + test_midi_learn(reaper)
+    failures = test_groove(reaper) + test_midi_learn(reaper) + test_time_stretch(reaper)
     if failures:
         print("FAILED:\n  " + "\n  ".join(failures))
         return 1

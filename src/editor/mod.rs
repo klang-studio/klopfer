@@ -12,14 +12,18 @@ use crate::bank::{PadStatus, Preview, SampleBank};
 use crate::layers::LayerConfig;
 use crate::midi_learn::MidiLearn;
 use crate::params::KlopferParams;
-use crate::{kit, Klopfer, Task};
+use crate::recording::Recorder;
+use crate::settings::Settings;
+use crate::{kit, sfz, Klopfer, Task};
 
 mod dialogs;
 mod drop;
+mod edit_tab;
 mod layers_tab;
 mod mixer;
 mod mod_tab;
 mod pads;
+mod rec_tab;
 mod theme;
 mod waveform;
 mod widgets;
@@ -41,6 +45,8 @@ enum Tab {
     Main,
     Layers,
     Mod,
+    Edit,
+    Rec,
 }
 
 struct EditorState {
@@ -59,6 +65,11 @@ struct EditorState {
     dialogs: Dialogs,
     /// Where dropped files can go, collected anew every frame
     drop_zones: drop::DropZones,
+    slicer: edit_tab::Slicer,
+    /// MIDI file waiting for its save dialog
+    pending_midi: Option<Vec<u8>>,
+    rec: rec_tab::RecOptions,
+    settings: Settings,
 }
 
 impl Default for EditorState {
@@ -74,6 +85,10 @@ impl Default for EditorState {
             last_dir: None,
             dialogs: Dialogs::default(),
             drop_zones: drop::DropZones::default(),
+            slicer: edit_tab::Slicer::default(),
+            pending_midi: None,
+            rec: rec_tab::RecOptions::default(),
+            settings: Settings::load(),
         };
         #[cfg(feature = "standalone")]
         let state = state.with_dev_overrides();
@@ -100,6 +115,8 @@ impl EditorState {
                 }
                 ("tab", "layers") => self.tab = Tab::Layers,
                 ("tab", "mod") => self.tab = Tab::Mod,
+                ("tab", "edit") => self.tab = Tab::Edit,
+                ("tab", "rec") => self.tab = Tab::Rec,
                 ("view", "mixer") => self.view = View::Mixer,
                 _ => {}
             }
@@ -119,6 +136,7 @@ impl EditorState {
 struct Ctx<'a> {
     params: &'a KlopferParams,
     bank: &'a SampleBank,
+    recorder: &'a Recorder,
     executor: &'a AsyncExecutor<Klopfer>,
     setter: &'a ParamSetter<'a>,
 }
@@ -127,6 +145,7 @@ pub(crate) fn create(
     params: Arc<KlopferParams>,
     bank: Arc<SampleBank>,
     learn: Arc<MidiLearn>,
+    recorder: Arc<Recorder>,
     executor: AsyncExecutor<Klopfer>,
 ) -> Option<Box<dyn Editor>> {
     create_egui_editor(
@@ -150,6 +169,7 @@ pub(crate) fn create(
             let c = Ctx {
                 params: &params,
                 bank: &bank,
+                recorder: &recorder,
                 executor: &executor,
                 setter,
             };
@@ -157,6 +177,7 @@ pub(crate) fn create(
             if let Some(outcome) = state.dialogs.take_outcome() {
                 apply_dialog_outcome(&c, state, outcome);
             }
+            rec_tab::collect_take(&c, state);
             state.drop_zones.clear();
 
             egui::TopBottomPanel::top("top")
@@ -328,20 +349,50 @@ fn apply_dialog_outcome(c: &Ctx, state: &mut EditorState, outcome: Outcome) {
                 found.len() < missing.len(),
             ));
         }
-        Outcome::LoadKit(file) => match kit::load(&file) {
-            Ok(kit_state) => {
-                // Decode on this thread so restoring the state doesn't have to
-                for (slot, path) in kit::sample_paths(&kit_state).into_iter().enumerate() {
-                    if c.bank.request(slot, path.clone()) {
-                        c.bank.load(slot, path);
+        Outcome::LoadKit(file) => {
+            let is_sfz = file
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("sfz"));
+            let loaded = if is_sfz {
+                // SFZ kits only describe what they use; everything else starts from scratch
+                sfz::load(&file).map(|import| {
+                    new_kit(c, state);
+                    let message =
+                        (!import.warnings.is_empty()).then(|| (import.warnings.join("; "), true));
+                    (import.state, message)
+                })
+            } else {
+                kit::load(&file).map(|s| (s, None))
+            };
+            match loaded {
+                Ok((kit_state, message)) => {
+                    // Decode on this thread so restoring the state doesn't have to
+                    for (slot, path) in kit::sample_paths(&kit_state).into_iter().enumerate() {
+                        if c.bank.request(slot, path.clone()) {
+                            c.bank.load(slot, path);
+                        }
                     }
+                    c.setter.raw_context.set_state(kit_state);
+                    state.last_dir = file.parent().map(Path::to_path_buf);
+                    state.message = message;
                 }
-                c.setter.raw_context.set_state(kit_state);
-                state.last_dir = file.parent().map(Path::to_path_buf);
-                state.message = None;
+                Err(e) => state.message = Some((e, true)),
             }
-            Err(e) => state.message = Some((e, true)),
-        },
+        }
+        Outcome::ExportMidi(file) => {
+            if let Some(bytes) = state.pending_midi.take() {
+                state.message = Some(match std::fs::write(&file, bytes) {
+                    Ok(()) => (String::from("MIDI file exported"), false),
+                    Err(e) => (format!("cannot write MIDI file: {e}"), true),
+                });
+            }
+        }
+        Outcome::RecordingsFolder(dir) => {
+            state.settings.recordings_dir = Some(dir);
+            if let Err(e) = state.settings.save() {
+                state.message = Some((e, true));
+            }
+        }
         Outcome::SaveKit(file) => match kit::save(&c.setter.raw_context.get_state(), &file) {
             Ok(()) => {
                 *c.params.kit_name.write() = file_name(&file);

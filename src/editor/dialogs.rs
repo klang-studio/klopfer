@@ -25,6 +25,10 @@ pub enum Request {
     SaveKit {
         file_name: String,
     },
+    ExportMidi {
+        file_name: String,
+    },
+    RecordingsFolder,
 }
 
 pub enum Outcome {
@@ -37,6 +41,8 @@ pub enum Outcome {
     RelinkFolder(PathBuf),
     LoadKit(PathBuf),
     SaveKit(PathBuf),
+    ExportMidi(PathBuf),
+    RecordingsFolder(PathBuf),
 }
 
 #[derive(Default)]
@@ -92,7 +98,7 @@ fn run(request: Request, start_dir: Option<PathBuf>) -> Option<Outcome> {
             }),
         Request::RelinkFolder => dialog.pick_folder().map(Outcome::RelinkFolder),
         Request::LoadKit => dialog
-            .add_filter("Klopfer Kit", &[kit::EXTENSION])
+            .add_filter("Klopfer Kit or SFZ", &[kit::EXTENSION, "sfz"])
             .pick_file()
             .map(Outcome::LoadKit),
         Request::SaveKit { file_name } => dialog
@@ -100,5 +106,11 @@ fn run(request: Request, start_dir: Option<PathBuf>) -> Option<Outcome> {
             .set_file_name(file_name)
             .save_file()
             .map(Outcome::SaveKit),
+        Request::ExportMidi { file_name } => dialog
+            .add_filter("MIDI File", &["mid"])
+            .set_file_name(file_name)
+            .save_file()
+            .map(Outcome::ExportMidi),
+        Request::RecordingsFolder => dialog.pick_folder().map(Outcome::RecordingsFolder),
     }
 }

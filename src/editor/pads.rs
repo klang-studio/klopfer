@@ -12,8 +12,8 @@ use nih_plug_egui::egui::{
 use super::drop::DropTarget;
 use super::widgets::{choice, section, toggle, Knob};
 use super::{
-    bank_selector, clear_pad, layers_tab, mod_tab, pad_status, pick_sample, theme, waveform, Ctx,
-    EditorState, Tab,
+    bank_selector, clear_pad, edit_tab, layers_tab, mod_tab, pad_status, pick_sample, rec_tab,
+    theme, waveform, Ctx, EditorState, Tab,
 };
 use crate::bank::{PadStatus, Preview};
 use crate::params::note_name;
@@ -212,6 +212,8 @@ fn pad_editor(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
             (Tab::Main, "MAIN"),
             (Tab::Layers, "LAYERS"),
             (Tab::Mod, "MOD"),
+            (Tab::Edit, "EDIT"),
+            (Tab::Rec, "REC"),
         ] {
             if ui.selectable_label(state.tab == tab, label).clicked() {
                 state.tab = tab;
@@ -286,6 +288,8 @@ fn pad_editor(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
     match state.tab {
         Tab::Main => main_tab(ui, c, pad),
         Tab::Layers => layers_tab::show(ui, c, state),
+        Tab::Edit => edit_tab::show(ui, c, state, wave.rect),
+        Tab::Rec => rec_tab::show(ui, c, state),
         Tab::Mod => {}
     }
 }

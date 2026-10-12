@@ -8,22 +8,28 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use klopfer_dsp::{
-    slot_index, Engine, PadLayers, PadSettings, Sample, NUM_LAYERS, NUM_OUTPUTS, NUM_PADS,
-    NUM_SAMPLE_SLOTS,
+    slot_index, Engine, PadLayers, PadSettings, Sample, SampleSource, NUM_LAYERS, NUM_OUTPUTS,
+    NUM_PADS,
 };
 use nih_plug::prelude::*;
+use nih_plug::util::permit_alloc;
 
 mod bank;
 mod editor;
 pub mod kit;
 mod layers;
 pub mod loader;
+mod midi_file;
 mod midi_learn;
 mod params;
+mod recording;
+mod settings;
+pub mod sfz;
 
-use bank::{Preview, SampleBank};
+use bank::{AudioSlots, Preview, SampleBank, StretchKey};
 use midi_learn::{prune_overrides, set_override, MidiLearn, Override, Overrides};
 use params::KlopferParams;
+use recording::{Recorder, RecorderAudio};
 
 /// Time constant of the master gain smoothing
 const MASTER_SMOOTHING_MS: f32 = 10.0;
@@ -36,6 +42,8 @@ const DEFAULT_TEMPO: f64 = 120.0;
 const METER_DECAY_MS: f32 = 300.0;
 
 const AUX_OUTPUTS: [NonZeroU32; NUM_OUTPUTS - 1] = [new_nonzero_u32(2); NUM_OUTPUTS - 1];
+/// Stereo sidechain input for recording
+const SIDECHAIN: [NonZeroU32; 1] = [new_nonzero_u32(2)];
 const AUX_NAMES: [&str; NUM_OUTPUTS - 1] = [
     "Out 2", "Out 3", "Out 4", "Out 5", "Out 6", "Out 7", "Out 8", "Out 9", "Out 10", "Out 11",
     "Out 12", "Out 13", "Out 14", "Out 15", "Out 16",
@@ -68,6 +76,12 @@ impl TransportInfo {
 pub enum Task {
     /// Load a sample slot, see [`klopfer_dsp::slot_index()`]
     Load { slot: usize, path: Option<String> },
+    /// Render the time stretched version of a sample slot
+    Stretch {
+        slot: usize,
+        key: StretchKey,
+        generation: u64,
+    },
     /// Store the MIDI learn assignments in the plugin state
     PersistMidiMap,
 }
@@ -76,9 +90,14 @@ pub struct Klopfer {
     params: Arc<KlopferParams>,
     bank: Arc<SampleBank>,
     learn: Arc<MidiLearn>,
+    recorder: Arc<Recorder>,
+    recorder_audio: RecorderAudio,
     engine: Engine,
     /// The audio thread's own view of the loaded samples, see [`SampleBank`]
-    slots: Vec<Option<Arc<Sample>>>,
+    audio: AudioSlots,
+    /// Pads whose time stretching is on
+    stretch_on: [bool; NUM_PADS],
+    process_mode: ProcessMode,
     settings: [PadSettings; NUM_PADS],
     layers: [PadLayers; NUM_PADS],
     notes: [u8; NUM_PADS],
@@ -124,8 +143,12 @@ impl Default for Klopfer {
             params,
             bank: Arc::new(SampleBank::default()),
             learn,
+            recorder: Arc::new(Recorder::default()),
+            recorder_audio: RecorderAudio::default(),
             engine: Engine::new(44100.0),
-            slots: vec![None; NUM_SAMPLE_SLOTS],
+            audio: AudioSlots::default(),
+            stretch_on: [false; NUM_PADS],
+            process_mode: ProcessMode::Realtime,
             settings: [PadSettings::default(); NUM_PADS],
             layers: [PadLayers::default(); NUM_PADS],
             notes: [0; NUM_PADS],
@@ -138,7 +161,68 @@ impl Default for Klopfer {
     }
 }
 
+/// The samples voices play: the stretched version where time stretching is on and rendered,
+/// the original otherwise.
+struct Playing<'a> {
+    audio: &'a AudioSlots,
+    stretch_on: &'a [bool; NUM_PADS],
+}
+
+impl SampleSource for Playing<'_> {
+    #[inline]
+    fn sample(&self, slot: usize) -> Option<&Sample> {
+        let original = self.audio.originals.get(slot)?.as_deref();
+        if self.stretch_on[slot / NUM_LAYERS] {
+            self.audio.stretched[slot].as_deref().or(original)
+        } else {
+            original
+        }
+    }
+}
+
 impl Klopfer {
+    /// Requests renderings for pads whose stretch settings changed. Each change is requested
+    /// once; `request` runs or schedules the task.
+    fn request_stretches(&mut self, tempo: f64, request: &mut impl FnMut(Task)) {
+        let v = Overrides(&self.overrides);
+        for (pad, p) in self.params.pads.iter().enumerate() {
+            let mode = v.enumv(&p.stretch_mode).to_dsp();
+            self.stretch_on[pad] = mode.is_some();
+            let Some(mode) = mode else {
+                continue;
+            };
+
+            let tune = v.int(&p.tune) as f32 + v.float(&p.fine) / 100.0;
+            for layer in 0..NUM_LAYERS {
+                let slot = slot_index(pad, layer);
+                let Some(original) = self.audio.originals[slot].as_deref() else {
+                    continue;
+                };
+                let ratio = if v.bool(&p.stretch_sync) {
+                    // Fit the playback region to the target length
+                    let region = (v.float(&p.end) - v.float(&p.start)).abs().max(1e-3)
+                        * original.duration_secs();
+                    let target = v.enumv(&p.stretch_beats).beats() * 60.0 / tempo;
+                    target as f32 / region
+                } else {
+                    v.float(&p.stretch_length)
+                };
+                let pitch = tune + self.layers[pad].layers[layer].tune;
+
+                let key = StretchKey::new(mode, ratio, pitch);
+                if self.audio.stretch_requested[slot] != Some(key) {
+                    self.audio.stretch_requested[slot] = Some(key);
+                    let generation = self.bank.next_stretch_gen(slot);
+                    request(Task::Stretch {
+                        slot,
+                        key,
+                        generation,
+                    });
+                }
+            }
+        }
+    }
+
     fn update_settings(&mut self, transport: TransportInfo) {
         let sample_rate = self.engine.sample_rate();
         let tempo = transport.tempo;
@@ -167,8 +251,12 @@ impl Klopfer {
         // Several pads may share a note, they're layered then
         for pad in 0..NUM_PADS {
             if self.notes[pad] == note {
+                let samples = Playing {
+                    audio: &self.audio,
+                    stretch_on: &self.stretch_on,
+                };
                 self.engine
-                    .note_on(pad, velocity, &self.slots, &self.settings, &self.layers);
+                    .note_on(pad, velocity, &samples, &self.settings, &self.layers);
             }
         }
     }
@@ -193,22 +281,24 @@ impl Plugin for Klopfer {
         AudioIOLayout {
             main_input_channels: None,
             main_output_channels: NonZeroU32::new(2),
-            aux_input_ports: &[],
+            aux_input_ports: &SIDECHAIN,
             aux_output_ports: &AUX_OUTPUTS,
             names: PortNames {
                 layout: Some("Multi-Out"),
                 main_input: None,
                 main_output: Some("Main"),
-                aux_inputs: &[],
+                aux_inputs: &["Sidechain"],
                 aux_outputs: &AUX_NAMES,
             },
         },
         AudioIOLayout {
             main_input_channels: None,
             main_output_channels: NonZeroU32::new(2),
+            aux_input_ports: &SIDECHAIN,
             names: PortNames {
                 layout: Some("Stereo"),
                 main_output: Some("Main"),
+                aux_inputs: &["Sidechain"],
                 ..PortNames::const_default()
             },
             ..AudioIOLayout::const_default()
@@ -228,6 +318,11 @@ impl Plugin for Klopfer {
         let learn = self.learn.clone();
         Box::new(move |task| match task {
             Task::Load { slot, path } => bank.load(slot, path),
+            Task::Stretch {
+                slot,
+                key,
+                generation,
+            } => bank.render_stretch(slot, key, generation),
             Task::PersistMidiMap => *params.midi_map.write() = learn.assignments(),
         })
     }
@@ -241,6 +336,7 @@ impl Plugin for Klopfer {
             self.params.clone(),
             self.bank.clone(),
             self.learn.clone(),
+            self.recorder.clone(),
             async_executor,
         )
     }
@@ -252,6 +348,8 @@ impl Plugin for Klopfer {
         context: &mut impl InitContext<Self>,
     ) -> bool {
         self.engine = Engine::new(buffer_config.sample_rate);
+        self.recorder_audio
+            .set_sample_rate(&self.recorder, buffer_config.sample_rate);
         self.meter_decay = 0.1f32.powf(1.0 / (METER_DECAY_MS / 1000.0 * buffer_config.sample_rate));
         self.master_coeff =
             (-1.0 / (MASTER_SMOOTHING_MS / 1000.0 * buffer_config.sample_rate)).exp();
@@ -286,9 +384,15 @@ impl Plugin for Klopfer {
         }
         let engine = &mut self.engine;
         self.bank
-            .apply_swaps(&mut self.slots, |slot| engine.kill_slot(slot));
-
+            .apply_swaps(&mut self.audio, |slot| engine.kill_slot(slot));
         self.update_settings(TransportInfo::STOPPED);
+
+        // Render time stretched samples right away as well
+        self.process_mode = buffer_config.process_mode;
+        self.request_stretches(DEFAULT_TEMPO, &mut |task| context.execute(task));
+        let engine = &mut self.engine;
+        self.bank
+            .apply_swaps(&mut self.audio, |slot| engine.kill_slot(slot));
         true
     }
 
@@ -304,22 +408,57 @@ impl Plugin for Klopfer {
     ) -> ProcessStatus {
         let engine = &mut self.engine;
         self.bank
-            .apply_swaps(&mut self.slots, |slot| engine.kill_slot(slot));
+            .apply_swaps(&mut self.audio, |slot| engine.kill_slot(slot));
         prune_overrides(&mut self.overrides);
         let transport = TransportInfo::from_host(context.transport());
         self.update_settings(transport);
 
+        if self.process_mode == ProcessMode::Offline {
+            // Offline renders can't wait for the background thread: render here and use the
+            // result in this very block
+            let bank = self.bank.clone();
+            self.request_stretches(transport.tempo, &mut |task| {
+                if let Task::Stretch {
+                    slot,
+                    key,
+                    generation,
+                } = task
+                {
+                    permit_alloc(|| bank.render_stretch(slot, key, generation));
+                }
+            });
+            let engine = &mut self.engine;
+            self.bank
+                .apply_swaps(&mut self.audio, |slot| engine.kill_slot(slot));
+        } else {
+            self.request_stretches(transport.tempo, &mut |task| {
+                context.execute_background(task)
+            });
+        }
+
         while let Some(preview) = self.bank.previews.pop() {
             match preview {
                 Preview::On { pad, velocity } => {
+                    let samples = Playing {
+                        audio: &self.audio,
+                        stretch_on: &self.stretch_on,
+                    };
                     self.engine
-                        .note_on(pad, velocity, &self.slots, &self.settings, &self.layers)
+                        .note_on(pad, velocity, &samples, &self.settings, &self.layers)
                 }
                 Preview::Off { pad } => self.engine.note_off(pad, &self.settings),
             }
         }
 
         let num_samples = buffer.samples();
+        if let Some(input) = aux.inputs.first_mut() {
+            let channels = input.as_slice();
+            if let Some((left, rest)) = channels.split_first() {
+                let right = rest.first().unwrap_or(left);
+                self.recorder_audio.process(&self.recorder, left, right);
+            }
+        }
+
         let main = buffer.as_slice();
         let has_aux = !aux.outputs.is_empty();
         for out in aux.outputs.iter_mut() {
@@ -352,8 +491,11 @@ impl Plugin for Klopfer {
             }
 
             let mut bus = [[0.0f32; 2]; NUM_OUTPUTS];
-            self.engine
-                .render_frame(&self.slots, &self.settings, &mut bus);
+            let samples = Playing {
+                audio: &self.audio,
+                stretch_on: &self.stretch_on,
+            };
+            self.engine.render_frame(&samples, &self.settings, &mut bus);
             self.master_gain =
                 self.master_target + (self.master_gain - self.master_target) * self.master_coeff;
             let master = self.master_gain;
