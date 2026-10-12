@@ -14,12 +14,14 @@ use nih_plug_egui::egui::{
 
 use crate::bank::{PadStatus, Preview, SampleBank};
 use crate::params::{note_name, KlopferParams};
-use crate::{kit, loader, Klopfer, Task};
+use crate::{kit, Klopfer, Task};
 
+mod dialogs;
 mod theme;
 mod waveform;
 mod widgets;
 
+use dialogs::{Dialogs, Outcome, Request};
 use widgets::{choice, fader, section, toggle, Knob};
 
 pub const WIDTH: u32 = 1100;
@@ -42,6 +44,7 @@ struct EditorState {
     /// Status line text, `true` marks errors
     message: Option<(String, bool)>,
     last_dir: Option<PathBuf>,
+    dialogs: Dialogs,
 }
 
 impl Default for EditorState {
@@ -52,6 +55,7 @@ impl Default for EditorState {
             held_pad: None,
             message: None,
             last_dir: None,
+            dialogs: Dialogs::default(),
         }
     }
 }
@@ -81,6 +85,10 @@ pub(crate) fn create(
                 executor: &executor,
                 setter,
             };
+
+            if let Some(outcome) = state.dialogs.take_outcome() {
+                apply_dialog_outcome(&c, state, outcome);
+            }
 
             egui::TopBottomPanel::top("top")
                 .exact_height(52.0)
@@ -140,20 +148,14 @@ fn assign_sample(c: &Ctx, pad: usize, path: Option<String>, rename: bool) {
     }
 }
 
-fn pick_sample(c: &Ctx, state: &mut EditorState, pad: usize, rename: bool) {
-    let mut dialog = rfd::FileDialog::new().add_filter("Audio", loader::SUPPORTED_EXTENSIONS);
-    if let Some(dir) = &state.last_dir {
-        dialog = dialog.set_directory(dir);
-    }
-    if let Some(file) = dialog.pick_file() {
-        state.last_dir = file.parent().map(Path::to_path_buf);
-        assign_sample(c, pad, Some(file.to_string_lossy().into_owned()), rename);
-        state.message = None;
-    }
+fn pick_sample(state: &mut EditorState, pad: usize, rename: bool) {
+    state
+        .dialogs
+        .show(Request::Sample { pad, rename }, state.last_dir.clone());
 }
 
-fn relink_folder(c: &Ctx, state: &mut EditorState) {
-    let missing: Vec<(usize, String)> = (0..NUM_PADS)
+fn missing_samples(c: &Ctx) -> Vec<(usize, String)> {
+    (0..NUM_PADS)
         .filter_map(|pad| {
             let slot = c.bank.slots[pad].read();
             match (&slot.status, &slot.requested) {
@@ -161,27 +163,17 @@ fn relink_folder(c: &Ctx, state: &mut EditorState) {
                 _ => None,
             }
         })
-        .collect();
-    if missing.is_empty() {
-        state.message = Some((String::from("No missing samples"), false));
-        return;
-    }
+        .collect()
+}
 
-    let Some(dir) = rfd::FileDialog::new().pick_folder() else {
-        return;
-    };
-    let found = kit::find_missing(&missing, &dir);
-    for (pad, path) in &found {
-        assign_sample(c, *pad, Some(path.clone()), false);
+fn relink_folder(c: &Ctx, state: &mut EditorState) {
+    if missing_samples(c).is_empty() {
+        state.message = Some((String::from("No missing samples"), false));
+    } else {
+        state
+            .dialogs
+            .show(Request::RelinkFolder, state.last_dir.clone());
     }
-    state.message = Some((
-        format!(
-            "Relinked {} of {} missing samples",
-            found.len(),
-            missing.len()
-        ),
-        found.len() < missing.len(),
-    ));
 }
 
 fn new_kit(c: &Ctx, state: &mut EditorState) {
@@ -201,45 +193,58 @@ fn new_kit(c: &Ctx, state: &mut EditorState) {
     state.message = None;
 }
 
-fn load_kit(c: &Ctx, state: &mut EditorState) {
-    let Some(file) = rfd::FileDialog::new()
-        .add_filter("Klopfer Kit", &[kit::EXTENSION])
-        .pick_file()
-    else {
-        return;
-    };
-
-    match kit::load(&file) {
-        Ok(kit_state) => {
-            // Decode on this thread so restoring the state doesn't have to
-            for (pad, path) in kit::sample_paths(&kit_state).into_iter().enumerate() {
-                if c.bank.request(pad, path.clone()) {
-                    c.bank.load(pad, path);
-                }
-            }
-            c.setter.raw_context.set_state(kit_state);
-            state.message = None;
-        }
-        Err(e) => state.message = Some((e, true)),
-    }
-}
-
 fn save_kit(c: &Ctx, state: &mut EditorState) {
     let name = c.params.kit_name.read().clone();
-    let Some(file) = rfd::FileDialog::new()
-        .add_filter("Klopfer Kit", &[kit::EXTENSION])
-        .set_file_name(format!("{name}.{}", kit::EXTENSION))
-        .save_file()
-    else {
-        return;
-    };
+    let file_name = format!("{name}.{}", kit::EXTENSION);
+    state
+        .dialogs
+        .show(Request::SaveKit { file_name }, state.last_dir.clone());
+}
 
-    match kit::save(&c.setter.raw_context.get_state(), &file) {
-        Ok(()) => {
-            *c.params.kit_name.write() = file_name(&file);
-            state.message = Some((String::from("Kit saved"), false));
+fn apply_dialog_outcome(c: &Ctx, state: &mut EditorState, outcome: Outcome) {
+    match outcome {
+        Outcome::Sample { pad, rename, path } => {
+            state.last_dir = path.parent().map(Path::to_path_buf);
+            assign_sample(c, pad, Some(path.to_string_lossy().into_owned()), rename);
+            state.message = None;
         }
-        Err(e) => state.message = Some((e, true)),
+        Outcome::RelinkFolder(dir) => {
+            let missing = missing_samples(c);
+            let found = kit::find_missing(&missing, &dir);
+            for (pad, path) in &found {
+                assign_sample(c, *pad, Some(path.clone()), false);
+            }
+            state.message = Some((
+                format!(
+                    "Relinked {} of {} missing samples",
+                    found.len(),
+                    missing.len()
+                ),
+                found.len() < missing.len(),
+            ));
+        }
+        Outcome::LoadKit(file) => match kit::load(&file) {
+            Ok(kit_state) => {
+                // Decode on this thread so restoring the state doesn't have to
+                for (pad, path) in kit::sample_paths(&kit_state).into_iter().enumerate() {
+                    if c.bank.request(pad, path.clone()) {
+                        c.bank.load(pad, path);
+                    }
+                }
+                c.setter.raw_context.set_state(kit_state);
+                state.last_dir = file.parent().map(Path::to_path_buf);
+                state.message = None;
+            }
+            Err(e) => state.message = Some((e, true)),
+        },
+        Outcome::SaveKit(file) => match kit::save(&c.setter.raw_context.get_state(), &file) {
+            Ok(()) => {
+                *c.params.kit_name.write() = file_name(&file);
+                state.last_dir = file.parent().map(Path::to_path_buf);
+                state.message = Some((String::from("Kit saved"), false));
+            }
+            Err(e) => state.message = Some((e, true)),
+        },
     }
 }
 
@@ -272,22 +277,25 @@ fn top_bar(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
                 );
             });
 
-        if ui.button("New").on_hover_text("Reset all pads").clicked() {
-            new_kit(c, state);
-        }
-        if ui.button("Load Kit…").clicked() {
-            load_kit(c, state);
-        }
-        if ui.button("Save Kit…").clicked() {
-            save_kit(c, state);
-        }
-        if ui
-            .button("Relink…")
-            .on_hover_text("Search a folder for missing samples")
-            .clicked()
-        {
-            relink_folder(c, state);
-        }
+        // One dialog at a time
+        ui.add_enabled_ui(!state.dialogs.is_open(), |ui| {
+            if ui.button("New").on_hover_text("Reset all pads").clicked() {
+                new_kit(c, state);
+            }
+            if ui.button("Load Kit…").clicked() {
+                state.dialogs.show(Request::LoadKit, state.last_dir.clone());
+            }
+            if ui.button("Save Kit…").clicked() {
+                save_kit(c, state);
+            }
+            if ui
+                .button("Relink…")
+                .on_hover_text("Search a folder for missing samples")
+                .clicked()
+            {
+                relink_folder(c, state);
+            }
+        });
 
         if let Some((msg, is_error)) = &state.message {
             ui.label(RichText::new(msg).font(theme::label()).color(if *is_error {
@@ -367,7 +375,7 @@ fn pad_grid(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
 
         response.context_menu(|ui| {
             if ui.button("Load sample…").clicked() {
-                pick_sample(c, state, pad, true);
+                pick_sample(state, pad, true);
                 ui.close_menu();
             }
             if ui.button("Clear").clicked() {
@@ -488,10 +496,10 @@ fn pad_editor(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
             }
             if matches!(status, PadStatus::Missing) {
                 if ui.button("Relink…").clicked() {
-                    pick_sample(c, state, pad, false);
+                    pick_sample(state, pad, false);
                 }
             } else if ui.button("Load…").clicked() {
-                pick_sample(c, state, pad, true);
+                pick_sample(state, pad, true);
             }
         });
     });
@@ -509,7 +517,7 @@ fn pad_editor(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
     let width = ui.available_width();
     let wave = waveform::show(ui, vec2(width, 130.0), &peaks, &status, p, s);
     if wave.clicked() && peaks.is_empty() {
-        pick_sample(c, state, pad, true);
+        pick_sample(state, pad, true);
     }
 
     ui.add_space(4.0);

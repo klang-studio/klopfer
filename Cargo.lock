@@ -1304,6 +1304,7 @@ dependencies = [
  "atomic_float 1.1.0",
  "cpal",
  "crossbeam-queue",
+ "dispatch2",
  "hound",
  "klopfer_dsp",
  "nih_plug",
