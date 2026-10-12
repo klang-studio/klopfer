@@ -1,0 +1,12 @@
+[submodule "vendor/baseview"]
+	path = vendor/baseview
+	url = https://github.com/klang-studio/baseview.git
+	branch = klopfer
+[submodule "vendor/egui-baseview"]
+	path = vendor/egui-baseview
+	url = https://github.com/klang-studio/egui-baseview.git
+	branch = klopfer
+[submodule "vendor/nice-plug"]
+	path = vendor/nice-plug
+	url = https://github.com/klang-studio/nice-plug.git
+	branch = klopfer

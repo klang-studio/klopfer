@@ -52,12 +52,13 @@ src/                  plugin: parameters, sample bank/loader, kits, process(), e
 xtask/                bundler (`cargo xtask bundle`)
 tools/testkit/        generates a synthetic drum kit for development
 tools/reaper-render-test.py   end-to-end test rendering through REAPER
-vendor/               patched nice-plug, baseview and egui-baseview, see vendor/README.md
+vendor/               forks of nice-plug, baseview and egui-baseview (git submodules), see vendor/README.md
 ```
 
 ## Building
 
 ```bash
+git submodule update --init                     # patched dependencies in vendor/
 cargo xtask bundle klopfer --release            # target/bundled/Klopfer.{vst3,clap}
 cargo xtask bundle-universal klopfer --release  # macOS universal binary (arm64 + x86_64)
 ```

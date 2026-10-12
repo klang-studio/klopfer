@@ -57,8 +57,14 @@ strip = "none"
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = "0.3"
 
-# Local copies with fixes, see vendor/README.md
+# Forks with fixes as git submodules, see vendor/README.md. All nice-plug crates come from the same
+# checkout, so they share one nice-plug-core.
 [patch.crates-io]
 baseview = { path = "vendor/baseview" }
 egui-baseview = { path = "vendor/egui-baseview" }
-nice-plug = { path = "vendor/nice-plug" }
+nice-log = { path = "vendor/nice-plug/crates/nice-log" }
+nice-plug = { path = "vendor/nice-plug/crates/nice-plug" }
+nice-plug-core = { path = "vendor/nice-plug/crates/nice-plug-core" }
+nice-plug-derive = { path = "vendor/nice-plug/crates/nice-plug-derive" }
+nice-plug-egui = { path = "vendor/nice-plug/crates/nice-plug-egui" }
+nice-plug-xtask = { path = "vendor/nice-plug/crates/nice-plug-xtask" }

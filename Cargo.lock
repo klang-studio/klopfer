@@ -1613,8 +1613,6 @@ dependencies = [
 [[package]]
 name = "nice-log"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3921836d433fa74f9df4fbb56bddedb075a7689805135d10b614ffdf631be36c"
 dependencies = [
  "tracing-appender",
  "windows",
@@ -1662,8 +1660,6 @@ dependencies = [
 [[package]]
 name = "nice-plug-core"
 version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab8fe3f3e395c1140d7519a78069b59b2e3bf6da2b904d0c54ad7ab49a60ba09"
 dependencies = [
  "atomic_float",
  "atomic_refcell",
@@ -1684,8 +1680,6 @@ dependencies = [
 [[package]]
 name = "nice-plug-derive"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2952ae91d0701916f887973dd0b84ac70007761872b7689395c7adc0e803b232"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1695,8 +1689,6 @@ dependencies = [
 [[package]]
 name = "nice-plug-egui"
 version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fcf7478a8ceedb1658e0de4f1548488807f177a962727c54753d78d649f9472"
 dependencies = [
  "crossbeam",
  "egui",
@@ -1710,8 +1702,6 @@ dependencies = [
 [[package]]
 name = "nice-plug-xtask"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f79473500b1d4253e13d6babfb9320c03536b040858c7d46071a244ca778e60"
 dependencies = [
  "anyhow",
  "cargo_metadata",
