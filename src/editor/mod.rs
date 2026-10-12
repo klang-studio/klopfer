@@ -20,6 +20,7 @@ use crate::recording::Recorder;
 use crate::settings::Settings;
 use crate::{kit, sfz, Klopfer, Task};
 
+mod browser;
 mod dialogs;
 mod drop;
 mod edit_tab;
@@ -40,7 +41,10 @@ pub const HEIGHT: u32 = 600;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
+    /// Sample browser and pad grid
     Pads,
+    /// The selected pad's editor
+    Editor,
     Mixer,
 }
 
@@ -74,6 +78,7 @@ struct EditorState {
     pending_midi: Option<Vec<u8>>,
     rec: rec_tab::RecOptions,
     settings: Settings,
+    browser: browser::Browser,
 }
 
 impl Default for EditorState {
@@ -93,6 +98,7 @@ impl Default for EditorState {
             pending_midi: None,
             rec: rec_tab::RecOptions::default(),
             settings: Settings::load(),
+            browser: browser::Browser::default(),
         };
         #[cfg(feature = "standalone")]
         let state = state.with_dev_overrides();
@@ -117,10 +123,17 @@ impl EditorState {
                         self.bank = pad / PADS_PER_BANK;
                     }
                 }
-                ("tab", "layers") => self.tab = Tab::Layers,
-                ("tab", "mod") => self.tab = Tab::Mod,
-                ("tab", "edit") => self.tab = Tab::Edit,
-                ("tab", "rec") => self.tab = Tab::Rec,
+                ("tab", tab) => {
+                    self.view = View::Editor;
+                    match tab {
+                        "layers" => self.tab = Tab::Layers,
+                        "mod" => self.tab = Tab::Mod,
+                        "edit" => self.tab = Tab::Edit,
+                        "rec" => self.tab = Tab::Rec,
+                        _ => {}
+                    }
+                }
+                ("view", "editor") => self.view = View::Editor,
                 ("view", "mixer") => self.view = View::Mixer,
                 _ => {}
             }
@@ -252,6 +265,7 @@ impl NiceEguiApp for KlopferEditor {
             )
             .show(ui, |ui| match state.view {
                 View::Pads => pads::pads_view(ui, &c, state),
+                View::Editor => pads::editor_view(ui, &c, state),
                 View::Mixer => mixer::mixer_view(ui, &c, state),
             });
 
@@ -441,6 +455,13 @@ fn apply_dialog_outcome(c: &Ctx, state: &mut EditorState, outcome: Outcome) {
                 });
             }
         }
+        Outcome::BrowserFolder(dir) => {
+            state.settings.browser_dir = Some(dir);
+            state.browser.refresh();
+            if let Err(e) = state.settings.save() {
+                state.message = Some((e, true));
+            }
+        }
         Outcome::RecordingsFolder(dir) => {
             state.settings.recordings_dir = Some(dir);
             if let Err(e) = state.settings.save() {
@@ -522,7 +543,11 @@ fn top_bar(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
                     .compact(),
             );
             ui.add_space(12.0);
-            for (view, label) in [(View::Mixer, "MIXER"), (View::Pads, "PADS")] {
+            for (view, label) in [
+                (View::Mixer, "MIXER"),
+                (View::Editor, "EDITOR"),
+                (View::Pads, "PADS"),
+            ] {
                 if ui.selectable_label(state.view == view, label).clicked() {
                     state.view = view;
                 }

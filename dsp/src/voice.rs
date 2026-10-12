@@ -109,6 +109,11 @@ impl Voice {
         self.filter_env.trigger();
     }
 
+    /// Playback position in frames of the playing sample.
+    pub fn position(&self) -> f64 {
+        self.pos
+    }
+
     pub fn release(&mut self) {
         self.amp.release();
         self.env1.release();

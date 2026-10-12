@@ -104,8 +104,13 @@ pub struct SampleBank {
     garbage: ArrayQueue<Arc<Sample>>,
     /// GUI → audio thread
     pub previews: ArrayQueue<Preview>,
+    /// Background thread → audio thread: the sample to audition from the browser, `None` stops
+    auditions: ArrayQueue<Option<Arc<Sample>>>,
     /// Audio thread → GUI, decaying peak level per pad
     pub meters: [AtomicF32; NUM_PADS],
+    /// Audio thread → GUI, playback position per slot relative to the sample length, `-1.0` when
+    /// nothing plays. Only updated while the editor is open.
+    pub playheads: Vec<AtomicF32>,
 }
 
 impl Default for SampleBank {
@@ -121,7 +126,11 @@ impl Default for SampleBank {
                 .collect(),
             garbage: ArrayQueue::new(QUEUE_SIZE),
             previews: ArrayQueue::new(QUEUE_SIZE),
+            auditions: ArrayQueue::new(4),
             meters: std::array::from_fn(|_| AtomicF32::new(0.0)),
+            playheads: (0..NUM_SAMPLE_SLOTS)
+                .map(|_| AtomicF32::new(-1.0))
+                .collect(),
         }
     }
 }
@@ -228,6 +237,28 @@ impl SampleBank {
         }
     }
 
+    /// Plays `sample` once in place of the current audition, `None` stops it. Call from a
+    /// background or GUI thread.
+    pub fn audition(&self, sample: Option<Sample>) {
+        self.collect_garbage();
+        // Only the latest request matters, older ones are dropped here
+        let _ = self.auditions.force_push(sample.map(Arc::new));
+    }
+
+    /// Audio thread: switches `audition` to the latest requested sample. Never deallocates.
+    pub fn apply_audition(&self, audition: &mut Audition) {
+        while self.garbage.len() < self.garbage.capacity() {
+            let Some(sample) = self.auditions.pop() else {
+                break;
+            };
+            if let Some(old) = std::mem::replace(&mut audition.sample, sample) {
+                // Can't fail, we checked for room and we're the only producer
+                let _ = self.garbage.push(old);
+            }
+            audition.pos = 0.0;
+        }
+    }
+
     /// Audio thread: applies pending sample swaps. `on_swap` is called with the slot index before
     /// its sample changes. Never allocates or deallocates.
     pub fn apply_swaps(&self, audio: &mut AudioSlots, mut on_swap: impl FnMut(usize)) {
@@ -258,6 +289,33 @@ impl SampleBank {
                 let _ = self.garbage.push(sample);
             }
         }
+    }
+}
+
+/// Audio thread: plays a browser sample once, resampled to the output rate.
+#[derive(Default)]
+pub struct Audition {
+    sample: Option<Arc<Sample>>,
+    /// Position in the sample's frames
+    pos: f64,
+}
+
+impl Audition {
+    /// The next stereo frame at `sample_rate`, silence once the sample has ended.
+    pub fn next(&mut self, sample_rate: f32) -> [f32; 2] {
+        let Some(sample) = &self.sample else {
+            return [0.0; 2];
+        };
+        let i = self.pos as usize;
+        if i + 1 >= sample.left.len() {
+            return [0.0; 2];
+        }
+        let t = (self.pos - i as f64) as f32;
+        let lerp = |data: &[f32]| data[i] + (data[i + 1] - data[i]) * t;
+        let left = lerp(&sample.left);
+        let right = sample.right.as_deref().map_or(left, lerp);
+        self.pos += (sample.sample_rate / sample_rate) as f64;
+        [left, right]
     }
 }
 
@@ -346,5 +404,23 @@ mod tests {
         bank.apply_swaps(&mut slots, |_| {});
         assert!(slots.stretched[3].is_none());
         assert_eq!(slots.stretch_keys[3], None);
+    }
+
+    #[test]
+    fn auditions_play_once_at_the_output_rate() {
+        let bank = SampleBank::default();
+        let mut audition = Audition::default();
+        bank.audition(Some(Sample::mono(24000.0, vec![0.0, 1.0, 0.0])));
+        bank.apply_audition(&mut audition);
+
+        // Half the output rate: every other frame is interpolated
+        let left: Vec<f32> = (0..6).map(|_| audition.next(48000.0)[0]).collect();
+        assert_eq!(left, vec![0.0, 0.5, 1.0, 0.5, 0.0, 0.0]);
+
+        // A new audition replaces the old one, which goes back for deallocation
+        bank.audition(None);
+        bank.apply_audition(&mut audition);
+        assert_eq!(audition.next(48000.0), [0.0; 2]);
+        assert_eq!(bank.garbage.len(), 1);
     }
 }

@@ -29,6 +29,7 @@ pub enum Request {
         file_name: String,
     },
     RecordingsFolder,
+    BrowserFolder,
 }
 
 pub enum Outcome {
@@ -43,6 +44,7 @@ pub enum Outcome {
     SaveKit(PathBuf),
     ExportMidi(PathBuf),
     RecordingsFolder(PathBuf),
+    BrowserFolder(PathBuf),
 }
 
 #[derive(Default)]
@@ -112,5 +114,6 @@ fn run(request: Request, start_dir: Option<PathBuf>) -> Option<Outcome> {
             .save_file()
             .map(Outcome::ExportMidi),
         Request::RecordingsFolder => dialog.pick_folder().map(Outcome::RecordingsFolder),
+        Request::BrowserFolder => dialog.pick_folder().map(Outcome::BrowserFolder),
     }
 }

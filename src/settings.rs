@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     /// Where recordings go; `None` means the default folder
     pub recordings_dir: Option<PathBuf>,
+    /// The sample browser's folder; `None` means the default folder
+    pub browser_dir: Option<PathBuf>,
 }
 
 fn settings_file() -> Option<PathBuf> {
@@ -31,6 +33,14 @@ impl Settings {
         }
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         std::fs::write(file, json).map_err(|e| format!("cannot save settings: {e}"))
+    }
+
+    pub fn browser_dir(&self) -> PathBuf {
+        self.browser_dir
+            .clone()
+            .or_else(dirs::audio_dir)
+            .or_else(dirs::home_dir)
+            .unwrap_or_default()
     }
 
     pub fn recordings_dir(&self) -> PathBuf {

@@ -28,7 +28,7 @@ mod recording;
 mod settings;
 pub mod sfz;
 
-use bank::{AudioSlots, Preview, SampleBank, StretchKey};
+use bank::{AudioSlots, Audition, Preview, SampleBank, StretchKey};
 use midi_learn::{prune_overrides, set_override, MidiLearn, Override, Overrides};
 use params::KlopferParams;
 use recording::{Recorder, RecorderAudio};
@@ -76,6 +76,8 @@ impl TransportInfo {
 }
 
 pub enum Task {
+    /// Decode a file and audition it, see [`SampleBank::audition()`]
+    Audition(std::path::PathBuf),
     /// Load a sample slot, see [`klopfer_dsp::slot_index()`]
     Load { slot: usize, path: Option<String> },
     /// Render the time stretched version of a sample slot
@@ -100,6 +102,8 @@ pub struct Klopfer {
     engine: Engine,
     /// The audio thread's own view of the loaded samples, see [`SampleBank`]
     audio: AudioSlots,
+    /// Browser previews, mixed into the main output
+    audition: Audition,
     /// Pads whose time stretching is on
     stretch_on: [bool; NUM_PADS],
     process_mode: ProcessMode,
@@ -154,6 +158,7 @@ impl Default for Klopfer {
             recorder_audio: RecorderAudio::default(),
             engine: Engine::new(44100.0),
             audio: AudioSlots::default(),
+            audition: Audition::default(),
             stretch_on: [false; NUM_PADS],
             process_mode: ProcessMode::Realtime,
             settings: [PadSettings::default(); NUM_PADS],
@@ -326,6 +331,10 @@ impl Plugin for Klopfer {
         let learn = self.learn.clone();
         Box::new(move |task| match task {
             Task::Load { slot, path } => bank.load(slot, path),
+            Task::Audition(path) => match loader::load_sample(&path) {
+                Ok(sample) => bank.audition(Some(sample)),
+                Err(e) => nice_warn!("Cannot audition {}: {e}", path.display()),
+            },
             Task::Stretch {
                 slot,
                 key,
@@ -404,6 +413,7 @@ impl Plugin for Klopfer {
         let engine = &mut self.engine;
         self.bank
             .apply_swaps(&mut self.audio, |slot| engine.kill_slot(slot));
+        self.bank.apply_audition(&mut self.audition);
         prune_overrides(&mut self.overrides);
         let transport = TransportInfo::from_host(context.transport());
         self.update_settings(transport);
@@ -462,6 +472,7 @@ impl Plugin for Klopfer {
             }
         }
 
+        let sample_rate = self.engine.sample_rate();
         let mut next_event = context.next_event();
         for i in 0..num_samples {
             while let Some(event) = next_event {
@@ -513,6 +524,9 @@ impl Plugin for Klopfer {
                     bus[0][1] += bus[b][1];
                 }
             }
+            let audition = self.audition.next(sample_rate);
+            bus[0][0] += audition[0];
+            bus[0][1] += audition[1];
             for (c, ch) in main.iter_mut().enumerate().take(2) {
                 ch[i] = bus[0][c] * master;
             }
@@ -534,6 +548,15 @@ impl Plugin for Klopfer {
 
         let peaks = self.engine.take_pad_peaks();
         if self.editor_state.is_open() {
+            let samples = Playing {
+                audio: &self.audio,
+                stretch_on: &self.stretch_on,
+            };
+            let heads = self.engine.playheads(&samples);
+            for (head, pos) in self.bank.playheads.iter().zip(heads) {
+                head.store(pos, Ordering::Relaxed);
+            }
+
             let decay = self.meter_decay.powi(num_samples as i32);
             for (meter, peak) in self.bank.meters.iter().zip(peaks) {
                 let old = meter.load(Ordering::Relaxed);

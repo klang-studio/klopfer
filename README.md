@@ -39,8 +39,10 @@ License: GPL-3.0-or-later.
 - Projects store sample paths; missing samples can be relinked per layer or by searching a folder
 - Kit files (`.klopfer`) store samples relative to the kit, so kit folders stay portable. Kits and
   projects from the single-sample version are migrated to layer 1
-- GUI: pad grid with audition, pad editor (MAIN / LAYERS / MOD) with waveform and draggable
-  start/end markers, mixer view
+- GUI: PADS view with a sample browser (folder tree; click auditions, double-click loads into the
+  selected pad, drag onto a pad or layer) and the pad grid with waveform previews and audition;
+  EDITOR view with the pad editor (MAIN / LAYERS / MOD / EDIT / REC) with waveform and draggable
+  start/end markers; mixer view
 
 Parameter IDs and enum variant IDs are stable and must not change, saved projects depend on them.
 
@@ -88,7 +90,7 @@ cargo build --release --features standalone --bin klopfer_standalone
 KLOPFER_KIT=$PWD/testkit-out/Testkit.klopfer ./target/release/klopfer_standalone -b core-audio -l 2
 ```
 
-`KLOPFER_EDITOR=pad=13,tab=mod` (also `tab=layers`, `tab=edit`, `tab=rec`, `view=mixer`) opens the standalone editor in
+`KLOPFER_EDITOR=pad=13,tab=mod` (also `tab=layers`, `tab=edit`, `tab=rec`, `view=editor`, `view=mixer`) opens the standalone editor in
 a given state, e.g. for screenshots. `-l 2` selects the stereo layout. Unless `-r` is given, the
 standalone uses the JACK server's sample rate (JACK backend, also tried first without `-b`) or the
 output device's: nice-plug's CoreAudio/WASAPI backend aborts on a sample rate mismatch, and its JACK

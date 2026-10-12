@@ -1,4 +1,5 @@
-//! Drag and drop from the file manager: samples onto pads or layers, kit files anywhere.
+//! Drag and drop from the file manager and the sample browser: samples onto pads or layers, kit
+//! files anywhere.
 //!
 //! Widgets register their drop zones while the frame is laid out; at the end of the frame the
 //! zone under the pointer gets highlighted while files hover and receives them when dropped.
@@ -8,6 +9,7 @@ use std::path::PathBuf;
 use klopfer_dsp::{NUM_LAYERS, NUM_PADS};
 use egui::{self, Align2, CornerRadius, Rect, Stroke, StrokeKind};
 
+use super::browser::BrowserDrag;
 use super::dialogs::Outcome;
 use super::{apply_dialog_outcome, assign_sample, theme, Ctx, EditorState};
 use crate::{kit, loader};
@@ -127,7 +129,7 @@ fn overlay(ctx: &egui::Context, rect: Rect, text: &str) {
 /// Highlights the target while files hover and loads them when dropped. Call after the frame's
 /// widgets registered their zones.
 pub(super) fn handle(ctx: &egui::Context, c: &Ctx, state: &mut EditorState) {
-    let (hovered, dropped, pos) = ctx.input(|i| {
+    let (mut hovered, mut dropped, pos) = ctx.input(|i| {
         (
             i.raw
                 .hovered_files
@@ -142,6 +144,19 @@ pub(super) fn handle(ctx: &egui::Context, c: &Ctx, state: &mut EditorState) {
             i.pointer.hover_pos(),
         )
     });
+
+    // A file dragged out of the sample browser
+    let mut from_browser = false;
+    if let Some(drag) = egui::DragAndDrop::payload::<BrowserDrag>(ctx) {
+        from_browser = true;
+        if ctx.input(|i| i.pointer.any_released()) {
+            egui::DragAndDrop::clear_payload(ctx);
+            dropped.push(drag.0.clone());
+        } else {
+            hovered.push(drag.0.clone());
+        }
+    }
+
     let zone = pos.and_then(|p| state.drop_zones.at(p));
 
     if !hovered.is_empty() {
@@ -180,6 +195,8 @@ pub(super) fn handle(ctx: &egui::Context, c: &Ctx, state: &mut EditorState) {
                 )
             });
         }
+        // Releasing a browser file anywhere else just cancels the drag
+        (Plan::Samples(_), None) if from_browser => {}
         (Plan::Samples(_), None) => {
             state.message = Some((String::from("Drop samples onto a pad or a layer"), true));
         }

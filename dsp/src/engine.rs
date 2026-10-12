@@ -210,6 +210,26 @@ impl Engine {
         }
     }
 
+    /// The playback position of the most recently started voice per sample slot, relative to the
+    /// length of the sample it plays (the stretched one if stretching is on). `-1.0` for slots
+    /// without a playing voice.
+    pub fn playheads<S: SampleSource + ?Sized>(&self, samples: &S) -> [f32; NUM_SAMPLE_SLOTS] {
+        let mut heads = [-1.0; NUM_SAMPLE_SLOTS];
+        let mut newest = [0u64; NUM_SAMPLE_SLOTS];
+        for v in self.voices.iter().filter(|v| v.active) {
+            let Some(sample) = samples.sample(v.slot) else {
+                continue;
+            };
+            if heads[v.slot] >= 0.0 && v.id < newest[v.slot] {
+                continue;
+            }
+            let len = sample.len().max(1) as f64;
+            heads[v.slot] = (v.position() / len).clamp(0.0, 1.0) as f32;
+            newest[v.slot] = v.id;
+        }
+        heads
+    }
+
     /// Returns the per-pad peak levels since the last call and resets them.
     pub fn take_pad_peaks(&mut self) -> [f32; NUM_PADS] {
         std::mem::replace(&mut self.pad_peaks, [0.0; NUM_PADS])
@@ -274,6 +294,25 @@ mod tests {
         assert!((bus[0][0] - 0.5).abs() < 1e-3);
         t.render(&mut e, 4800);
         assert_eq!(e.active_voices(), 0);
+    }
+
+    #[test]
+    fn playheads_follow_the_newest_voice() {
+        let t = setup(&[]);
+        let mut e = Engine::new(SR);
+        assert!(e.playheads(t.samples.as_slice()).iter().all(|&h| h < 0.0));
+
+        t.hit(&mut e, 0, 1.0);
+        t.render(&mut e, 2400);
+        let heads = e.playheads(t.samples.as_slice());
+        assert!((heads[slot_index(0, 0)] - 0.5).abs() < 1e-3);
+        assert!(heads[slot_index(1, 0)] < 0.0);
+
+        // A retrigger shows the new voice, not the old one
+        t.hit(&mut e, 0, 1.0);
+        t.render(&mut e, 480);
+        let heads = e.playheads(t.samples.as_slice());
+        assert!((heads[slot_index(0, 0)] - 0.1).abs() < 1e-3);
     }
 
     #[test]
