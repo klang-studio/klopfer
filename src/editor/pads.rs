@@ -9,6 +9,7 @@ use nih_plug_egui::egui::{
     StrokeKind, Ui,
 };
 
+use super::drop::DropTarget;
 use super::widgets::{choice, section, toggle, Knob};
 use super::{
     bank_selector, clear_pad, layers_tab, mod_tab, pad_status, pick_sample, theme, waveform, Ctx,
@@ -57,6 +58,7 @@ fn pad_grid(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
             vec2(PAD_SIZE, PAD_SIZE),
         );
         let response = ui.interact(rect, ui.id().with(("pad", pad)), Sense::click());
+        state.drop_zones.add(rect, DropTarget::Pad(pad));
 
         let pressed =
             response.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
@@ -273,6 +275,9 @@ fn pad_editor(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
 
     let width = ui.available_width();
     let wave = waveform::show(ui, vec2(width, 120.0), &peaks, &status, p, c.setter);
+    state
+        .drop_zones
+        .add(wave.rect, DropTarget::Layer { pad, layer });
     if wave.clicked() && peaks.is_empty() && !state.dialogs.is_open() {
         pick_sample(state, pad, layer, layer == 0);
     }

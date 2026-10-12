@@ -1,5 +1,7 @@
 [workspace]
 members = [".", "dsp", "xtask", "tools/testkit"]
+# Patched dependencies, see vendor/README.md
+exclude = ["vendor"]
 resolver = "2"
 
 [package]
@@ -50,3 +52,10 @@ hound = "3.5.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = "0.3"
+
+# Local copies with drag and drop fixes, see vendor/README.md
+[patch."https://github.com/RustAudio/baseview.git"]
+baseview = { path = "vendor/baseview" }
+
+[patch."https://github.com/BillyDM/egui-baseview.git"]
+egui-baseview = { path = "vendor/egui-baseview" }

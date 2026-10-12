@@ -21,6 +21,9 @@ License: GPL-3.0-or-later (required by the VST3 bindings nih-plug uses).
 - MIDI learn: right-click any knob, toggle or fader. Assignments are stored in the project, not in
   kits, and work while the editor is closed
 - WAV, AIFF, FLAC, OGG and MP3 samples, decoded on a background thread
+- Drag and drop from Finder/Explorer: onto a pad (several files fill the following pads), onto the
+  waveform or a layer row (several files fill the following layers), `.klopfer` files anywhere load
+  the kit. Not available on Linux
 - Projects store sample paths; missing samples can be relinked per layer or by searching a folder
 - Kit files (`.klopfer`) store samples relative to the kit, so kit folders stay portable. Kits and
   projects from the single-sample version are migrated to layer 1
@@ -37,6 +40,7 @@ src/                  plugin: parameters, sample bank/loader, kits, process(), e
 xtask/                bundler (`cargo xtask bundle`)
 tools/testkit/        generates a synthetic drum kit for development
 tools/reaper-render-test.py   end-to-end test rendering through REAPER
+vendor/               patched baseview and egui-baseview for drag and drop, see vendor/README.md
 ```
 
 ## Building
@@ -50,8 +54,9 @@ Install by copying the bundles to your plugin folders, e.g. on macOS
 `~/Library/Audio/Plug-Ins/CLAP` and `~/Library/Audio/Plug-Ins/VST3`. Windows and Linux builds have
 to be made on those systems.
 
-Linux needs the X11/OpenGL development headers (e.g. `libx11-dev libxcursor-dev libxcb-dri2-0-dev
-libxcb-icccm4-dev libx11-xcb-dev libgl-dev libasound2-dev libjack-dev`). The GUI runs on X11 and
+Linux needs the X11/OpenGL/Wayland development headers (e.g. `libx11-dev libxcursor-dev
+libxcb-dri2-0-dev libxcb-icccm4-dev libx11-xcb-dev libgl-dev libwayland-dev libasound2-dev
+libjack-dev`). The GUI runs on X11 and
 via XWayland.
 
 ## Testing
@@ -77,12 +82,10 @@ a given state, e.g. for screenshots. `-l 2` selects the stereo layout. The stand
 
 ## Known limitations
 
-- Dragging files from the file manager onto pads is not supported yet: baseview delivers the drop
-  events, but egui-baseview doesn't forward them to egui.
+- Drag and drop needs the patched GUI dependencies in `vendor/` and doesn't work on Linux.
 - macOS builds are only ad-hoc signed; distribution needs a Developer ID and notarization.
 - Loading a kit while the host is playing can cause a short dropout.
 
 ## Roadmap
 
 - Phase 5: slicing, recording, time stretch, SFZ import
-- Drag and drop from the file manager (needs an egui-baseview change)

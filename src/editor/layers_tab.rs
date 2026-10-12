@@ -5,6 +5,7 @@ use std::path::Path;
 use klopfer_dsp::{slot_index, NUM_LAYERS};
 use nih_plug_egui::egui::{self, RichText, Ui};
 
+use super::drop::DropTarget;
 use super::widgets::plain_choice;
 use super::{assign_sample, file_name, pick_sample, theme, Ctx, EditorState};
 use crate::bank::PadStatus;
@@ -49,7 +50,8 @@ pub(super) fn show(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
             });
             ui.add_space(6.0);
 
-            egui::Grid::new(("layers", pad))
+            let mut rows = Vec::with_capacity(NUM_LAYERS);
+            let grid = egui::Grid::new(("layers", pad))
                 .num_columns(7)
                 .spacing([10.0, 8.0])
                 .show(ui, |ui| {
@@ -62,13 +64,13 @@ pub(super) fn show(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
                         let status = c.bank.slots[slot_index(pad, layer)].read().status.clone();
                         let l = &mut cfg.layers[layer];
 
-                        if ui
+                        let row = ui
                             .selectable_label(state.layer == layer, format!("L{}", layer + 1))
-                            .on_hover_text("Show this layer's waveform")
-                            .clicked()
-                        {
+                            .on_hover_text("Show this layer's waveform. Drop samples here.");
+                        if row.clicked() {
                             state.layer = layer;
                         }
+                        rows.push((layer, row.rect.y_range()));
 
                         let (text, color) = match (&status, &l.path) {
                             (PadStatus::Missing, _) => (String::from("MISSING"), theme::WARN),
@@ -123,6 +125,10 @@ pub(super) fn show(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
                         ui.end_row();
                     }
                 });
+            for (layer, y) in rows {
+                let rect = egui::Rect::from_x_y_ranges(grid.response.rect.x_range(), y).expand(4.0);
+                state.drop_zones.add(rect, DropTarget::Layer { pad, layer });
+            }
         });
 
     if cfg != before {

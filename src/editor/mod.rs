@@ -15,6 +15,7 @@ use crate::params::KlopferParams;
 use crate::{kit, Klopfer, Task};
 
 mod dialogs;
+mod drop;
 mod layers_tab;
 mod mixer;
 mod mod_tab;
@@ -56,6 +57,8 @@ struct EditorState {
     message: Option<(String, bool)>,
     last_dir: Option<PathBuf>,
     dialogs: Dialogs,
+    /// Where dropped files can go, collected anew every frame
+    drop_zones: drop::DropZones,
 }
 
 impl Default for EditorState {
@@ -70,6 +73,7 @@ impl Default for EditorState {
             message: None,
             last_dir: None,
             dialogs: Dialogs::default(),
+            drop_zones: drop::DropZones::default(),
         };
         #[cfg(feature = "standalone")]
         let state = state.with_dev_overrides();
@@ -153,6 +157,7 @@ pub(crate) fn create(
             if let Some(outcome) = state.dialogs.take_outcome() {
                 apply_dialog_outcome(&c, state, outcome);
             }
+            state.drop_zones.clear();
 
             egui::TopBottomPanel::top("top")
                 .exact_height(52.0)
@@ -173,6 +178,8 @@ pub(crate) fn create(
                     View::Pads => pads::pads_view(ui, &c, state),
                     View::Mixer => mixer::mixer_view(ui, &c, state),
                 });
+
+            drop::handle(ctx, &c, state);
 
             // Release a previewed pad when the mouse button goes up anywhere
             if let Some(pad) = state.held_pad {

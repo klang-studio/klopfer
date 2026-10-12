@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use klopfer_dsp::PADS_PER_BANK;
 use nih_plug_egui::egui::{self, vec2, Align2, CornerRadius, RichText, Sense, Stroke, Ui};
 
+use super::drop::DropTarget;
 use super::widgets::{fader, toggle, Knob};
 use super::{bank_selector, theme, Ctx, EditorState};
 
@@ -19,7 +20,7 @@ pub(super) fn mixer_view(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
             let color = theme::pad_color(pad);
             let selected = state.selected == pad;
 
-            egui::Frame::NONE
+            let strip = egui::Frame::NONE
                 .fill(theme::PANEL)
                 .corner_radius(CornerRadius::same(6))
                 .stroke(if selected {
@@ -72,6 +73,9 @@ pub(super) fn mixer_view(ui: &mut Ui, c: &Ctx, state: &mut EditorState) {
                         ui.add(Knob::new(&p.choke, s, "Choke").diameter(28.0));
                     });
                 });
+            state
+                .drop_zones
+                .add(strip.response.rect, DropTarget::Pad(pad));
         }
     });
 }
