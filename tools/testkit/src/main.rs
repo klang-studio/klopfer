@@ -61,12 +61,51 @@ fn mix(a: &[f32], b: &[f32], gb: f32) -> Vec<f32> {
         .collect()
 }
 
-fn normalize(mut v: Vec<f32>) -> Vec<f32> {
+/// Scales to the given peak level.
+fn normalize(mut v: Vec<f32>, level: f32) -> Vec<f32> {
     let peak = v.iter().fold(0.0f32, |m, x| m.max(x.abs()));
     if peak > 0.0 {
-        v.iter_mut().for_each(|x| *x *= 0.3 / peak);
+        v.iter_mut().for_each(|x| *x *= level / peak);
     }
     v
+}
+
+/// (file, audio, peak level, velocity range)
+type Layer = (&'static str, Vec<f32>, f32, (u8, u8));
+
+/// One pad of the test kit: its layers and any parameters that differ from the defaults.
+struct Pad {
+    name: &'static str,
+    mode: &'static str,
+    layers: Vec<Layer>,
+    /// (parameter ID without the pad suffix, serialized value)
+    params: Vec<(&'static str, serde_json::Value)>,
+}
+
+impl Pad {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            mode: "Velocity",
+            layers: Vec::new(),
+            params: Vec::new(),
+        }
+    }
+
+    fn mode(mut self, mode: &'static str) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    fn layer(mut self, file: &'static str, data: Vec<f32>, level: f32, vel: (u8, u8)) -> Self {
+        self.layers.push((file, data, level, vel));
+        self
+    }
+
+    fn param(mut self, id: &'static str, value: serde_json::Value) -> Self {
+        self.params.push((id, value));
+        self
+    }
 }
 
 fn write(path: &Path, data: &[f32]) {
@@ -112,86 +151,111 @@ fn main() {
         render(0.5, |t| (sq(540.0, t) + sq(800.0, t)) * 0.5 * env(t, 0.12))
     };
 
-    // (file, pad name, data, choke group)
-    let sounds: Vec<(&str, &str, Vec<f32>, i32)> = vec![
-        (
-            "kick.wav",
-            "Kick",
-            mix(
-                &sweep(160.0, 45.0, 0.03, 0.35, 1.0),
-                &hiss(1, 0.004, 0.02, 0.5),
-                0.3,
+    let snare = |seed: u32, detune: f32| {
+        mix(
+            &mix(
+                &sweep(190.0 * detune, 180.0 * detune, 0.05, 0.08, 0.5),
+                &sweep(330.0 * detune, 320.0 * detune, 0.05, 0.06, 0.5),
+                0.5,
             ),
-            0,
-        ),
-        (
-            "snare.wav",
-            "Snare",
-            mix(
-                &mix(
-                    &sweep(190.0, 180.0, 0.05, 0.08, 0.5),
-                    &sweep(330.0, 320.0, 0.05, 0.06, 0.5),
-                    0.5,
+            &hiss(seed, 0.15, 0.5, 0.7),
+            0.8,
+        )
+    };
+
+    let pads = vec![
+        Pad::new("Kick")
+            // Velocity layers: a softer, rounder kick for quiet hits
+            .layer(
+                "kick-soft.wav",
+                sweep(140.0, 48.0, 0.05, 0.3, 1.0),
+                0.15,
+                (1, 90),
+            )
+            .layer(
+                "kick.wav",
+                mix(
+                    &sweep(160.0, 45.0, 0.03, 0.35, 1.0),
+                    &hiss(1, 0.004, 0.02, 0.5),
+                    0.3,
                 ),
-                &hiss(2, 0.15, 0.5, 0.7),
-                0.8,
+                0.3,
+                (91, 127),
             ),
-            0,
-        ),
-        ("clap.wav", "Clap", clap, 0),
-        ("rim.wav", "Rim", rim, 0),
-        (
-            "hat-closed.wav",
-            "Hat Closed",
-            hiss(3, 0.035, 0.25, 0.95),
-            1,
-        ),
-        ("hat-open.wav", "Hat Open", hiss(4, 0.35, 1.2, 0.95), 1),
-        (
+        Pad::new("Snare")
+            // Round robin: three slightly different hits
+            .mode("RoundRobin")
+            .layer("snare-1.wav", snare(2, 1.0), 0.3, (1, 127))
+            .layer("snare-2.wav", snare(12, 1.02), 0.3, (1, 127))
+            .layer("snare-3.wav", snare(22, 0.98), 0.3, (1, 127)),
+        Pad::new("Clap").layer("clap.wav", clap, 0.3, (1, 127)),
+        Pad::new("Rim").layer("rim.wav", rim, 0.3, (1, 127)),
+        Pad::new("Hat Closed")
+            .layer("hat-closed.wav", hiss(3, 0.035, 0.25, 0.95), 0.3, (1, 127))
+            .param("choke", json!({ "i32": 1 })),
+        Pad::new("Hat Open")
+            .layer("hat-open.wav", hiss(4, 0.35, 1.2, 0.95), 0.3, (1, 127))
+            .param("choke", json!({ "i32": 1 })),
+        Pad::new("Shaker").layer(
             "shaker.wav",
-            "Shaker",
             render(0.2, {
                 let mut n = Noise(5);
                 move |t| n.next() * (t / 0.03).min(1.0) * env(t, 0.05)
             }),
-            0,
+            0.3,
+            (1, 127),
         ),
-        ("crash.wav", "Crash", hiss(6, 1.2, 3.0, 0.9), 0),
-        (
+        Pad::new("Crash").layer("crash.wav", hiss(6, 1.2, 3.0, 0.9), 0.3, (1, 127)),
+        Pad::new("Tom Low").layer(
             "tom-low.wav",
-            "Tom Low",
             sweep(130.0, 80.0, 0.08, 0.3, 1.0),
-            0,
+            0.3,
+            (1, 127),
         ),
-        (
+        Pad::new("Tom Mid").layer(
             "tom-mid.wav",
-            "Tom Mid",
             sweep(190.0, 120.0, 0.08, 0.28, 1.0),
-            0,
+            0.3,
+            (1, 127),
         ),
-        (
+        Pad::new("Tom High").layer(
             "tom-high.wav",
-            "Tom High",
             sweep(270.0, 170.0, 0.08, 0.25, 1.0),
-            0,
+            0.3,
+            (1, 127),
         ),
-        ("cowbell.wav", "Cowbell", cowbell, 0),
-        ("zap.wav", "Zap", sweep(2400.0, 90.0, 0.02, 0.15, 0.6), 0),
+        Pad::new("Cowbell").layer("cowbell.wav", cowbell, 0.3, (1, 127)),
+        Pad::new("Zap")
+            .layer(
+                "zap.wav",
+                sweep(2400.0, 90.0, 0.02, 0.15, 0.6),
+                0.3,
+                (1, 127),
+            )
+            // Modulation: a fast triangle LFO wobbles the pitch
+            .param("lfoshape", json!({ "string": "triangle" }))
+            .param("lforate", json!({ "f32": 12.0 }))
+            .param("src_1", json!({ "string": "lfo" }))
+            .param("dst_1", json!({ "string": "pitch" }))
+            .param("amt_1", json!({ "f32": 0.08 })),
     ];
 
-    // Same layout as nih-plug's PluginState: fields hold JSON encoded values
+    // Same layout as nih-plug's PluginState: fields hold JSON encoded values, parameter IDs of
+    // pad parameters end in the pad number
     let mut fields = serde_json::Map::new();
     let mut params = serde_json::Map::new();
-    for (pad, (file, name, data, choke)) in sounds.into_iter().enumerate() {
+    for (pad, def) in pads.into_iter().enumerate() {
         let n = pad + 1;
-        write(&samples_dir.join(file), &normalize(data));
-        fields.insert(
-            format!("path_{n}"),
-            json!(json!(format!("samples/{file}")).to_string()),
-        );
-        fields.insert(format!("name_{n}"), json!(json!(name).to_string()));
-        if choke > 0 {
-            params.insert(format!("choke_{n}"), json!({ "i32": choke }));
+        let mut layers = Vec::new();
+        for (file, data, level, (lo, hi)) in def.layers {
+            write(&samples_dir.join(file), &normalize(data, level));
+            layers.push(json!({ "path": format!("samples/{file}"), "vel_lo": lo, "vel_hi": hi }));
+        }
+        let layer_config = json!({ "mode": def.mode, "layers": layers });
+        fields.insert(format!("layers_{n}"), json!(layer_config.to_string()));
+        fields.insert(format!("name_{n}"), json!(json!(def.name).to_string()));
+        for (id, value) in def.params {
+            params.insert(format!("{id}_{n}"), value);
         }
     }
 

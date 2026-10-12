@@ -1,6 +1,7 @@
 //! Sample storage shared between the GUI, the background loader and the audio thread.
 //!
-//! The audio thread owns its own `[Option<Arc<Sample>>; NUM_PADS]`. New samples reach it through a
+//! Samples live in slots, one per pad layer (see [`klopfer_dsp::slot_index()`]). The audio thread
+//! owns its own `[Option<Arc<Sample>>; NUM_SAMPLE_SLOTS]`. New samples reach it through a
 //! lock-free queue, and replaced samples travel back through a second queue so they're never
 //! deallocated on the audio thread.
 
@@ -9,7 +10,7 @@ use std::sync::Arc;
 
 use atomic_float::AtomicF32;
 use crossbeam_queue::ArrayQueue;
-use klopfer_dsp::{Sample, NUM_PADS};
+use klopfer_dsp::{Sample, NUM_PADS, NUM_SAMPLE_SLOTS};
 use parking_lot::RwLock;
 
 use crate::loader;
@@ -27,7 +28,7 @@ pub enum PadStatus {
     Error(String),
 }
 
-/// What the GUI knows about a pad's sample.
+/// What the GUI knows about a sample slot.
 #[derive(Default)]
 pub struct PadSlot {
     /// The path that should be loaded. Used to drop stale loads and to skip redundant ones.
@@ -46,7 +47,7 @@ pub enum Preview {
 }
 
 pub struct SampleBank {
-    pub slots: [RwLock<PadSlot>; NUM_PADS],
+    pub slots: Vec<RwLock<PadSlot>>,
     to_audio: ArrayQueue<(usize, Option<Arc<Sample>>)>,
     garbage: ArrayQueue<Arc<Sample>>,
     /// GUI → audio thread
@@ -58,7 +59,9 @@ pub struct SampleBank {
 impl Default for SampleBank {
     fn default() -> Self {
         Self {
-            slots: std::array::from_fn(|_| RwLock::new(PadSlot::default())),
+            slots: (0..NUM_SAMPLE_SLOTS)
+                .map(|_| RwLock::new(PadSlot::default()))
+                .collect(),
             to_audio: ArrayQueue::new(QUEUE_SIZE),
             garbage: ArrayQueue::new(QUEUE_SIZE),
             previews: ArrayQueue::new(QUEUE_SIZE),
@@ -68,10 +71,10 @@ impl Default for SampleBank {
 }
 
 impl SampleBank {
-    /// Marks `path` as the wanted sample for `pad`. Returns `true` if it differs from what's
+    /// Marks `path` as the wanted sample for `slot`. Returns `true` if it differs from what's
     /// already requested, i.e. if a load is needed.
-    pub fn request(&self, pad: usize, path: Option<String>) -> bool {
-        let mut slot = self.slots[pad].write();
+    pub fn request(&self, slot: usize, path: Option<String>) -> bool {
+        let mut slot = self.slots[slot].write();
         if slot.requested == path {
             return false;
         }
@@ -79,12 +82,12 @@ impl SampleBank {
         true
     }
 
-    /// Loads the requested sample for `pad`. Blocking, call from a background or GUI thread.
-    pub fn load(&self, pad: usize, path: Option<String>) {
+    /// Loads the requested sample for `slot`. Blocking, call from a background or GUI thread.
+    pub fn load(&self, slot: usize, path: Option<String>) {
         self.collect_garbage();
 
         let Some(path) = path else {
-            self.install(pad, None, None, PadStatus::Empty);
+            self.install(slot, None, None, PadStatus::Empty);
             return;
         };
 
@@ -95,15 +98,15 @@ impl SampleBank {
         };
 
         match result {
-            Ok(sample) => self.install(pad, Some(&path), Some(sample), PadStatus::Loaded),
-            Err(status) => self.install(pad, Some(&path), None, status),
+            Ok(sample) => self.install(slot, Some(&path), Some(sample), PadStatus::Loaded),
+            Err(status) => self.install(slot, Some(&path), None, status),
         }
     }
 
-    fn install(&self, pad: usize, path: Option<&str>, sample: Option<Sample>, status: PadStatus) {
+    fn install(&self, index: usize, path: Option<&str>, sample: Option<Sample>, status: PadStatus) {
         let sample = sample.map(Arc::new);
         {
-            let mut slot = self.slots[pad].write();
+            let mut slot = self.slots[index].write();
             // A newer request superseded this one while decoding
             if slot.requested.as_deref() != path {
                 return;
@@ -118,7 +121,7 @@ impl SampleBank {
             slot.status = status;
         }
 
-        let mut msg = (pad, sample);
+        let mut msg = (index, sample);
         // The audio thread drains this every block, so this only spins when no audio is running
         for _ in 0..100 {
             match self.to_audio.push(msg) {
@@ -136,20 +139,16 @@ impl SampleBank {
         while self.garbage.pop().is_some() {}
     }
 
-    /// Audio thread: applies pending sample swaps to `slots`. `on_swap` is called with the pad
+    /// Audio thread: applies pending sample swaps to `slots`. `on_swap` is called with the slot
     /// index before its sample changes. Never allocates or deallocates.
-    pub fn apply_swaps(
-        &self,
-        slots: &mut [Option<Arc<Sample>>; NUM_PADS],
-        mut on_swap: impl FnMut(usize),
-    ) {
+    pub fn apply_swaps(&self, slots: &mut [Option<Arc<Sample>>], mut on_swap: impl FnMut(usize)) {
         // Only take new samples while the old ones can be handed back
         while self.garbage.len() < self.garbage.capacity() {
-            let Some((pad, sample)) = self.to_audio.pop() else {
+            let Some((index, sample)) = self.to_audio.pop() else {
                 break;
             };
-            on_swap(pad);
-            if let Some(old) = std::mem::replace(&mut slots[pad], sample) {
+            on_swap(index);
+            if let Some(old) = std::mem::replace(&mut slots[index], sample) {
                 // Can't fail, we checked for room and we're the only producer
                 let _ = self.garbage.push(old);
             }
@@ -164,7 +163,7 @@ mod tests {
     #[test]
     fn swaps_reach_audio_and_old_samples_come_back() {
         let bank = SampleBank::default();
-        let mut slots: [Option<Arc<Sample>>; NUM_PADS] = Default::default();
+        let mut slots = vec![None; NUM_SAMPLE_SLOTS];
 
         bank.request(0, Some(String::from("a")));
         bank.install(
@@ -188,7 +187,7 @@ mod tests {
     #[test]
     fn stale_loads_are_dropped() {
         let bank = SampleBank::default();
-        let mut slots: [Option<Arc<Sample>>; NUM_PADS] = Default::default();
+        let mut slots = vec![None; NUM_SAMPLE_SLOTS];
         bank.request(1, Some(String::from("new")));
         bank.install(
             1,

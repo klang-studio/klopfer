@@ -30,49 +30,52 @@ BPM = 120
 PPQ = 960
 
 
-def plugin_state() -> str:
+def plugin_state(extra_fields: dict | None = None) -> str:
     """The kit as a base64 CLAP state chunk. nih-plug prefixes its JSON with a u64 LE length."""
     kit = json.load(open(KIT))
+    kit["fields"].update(extra_fields or {})
     base = os.path.dirname(KIT)
     for key, value in kit["fields"].items():
-        if key.startswith("path_"):
-            kit["fields"][key] = json.dumps(os.path.join(base, json.loads(value)))
+        if key.startswith("layers_"):
+            layers = json.loads(value)
+            for layer in layers.get("layers", []):
+                if layer.get("path"):
+                    layer["path"] = os.path.join(base, layer["path"])
+            kit["fields"][key] = json.dumps(layers)
     data = json.dumps(kit).encode()
     b64 = base64.b64encode(struct.pack("<Q", len(data)) + data).decode()
     return "\n".join("          " + b64[i : i + 128] for i in range(0, len(b64), 128))
 
 
-def midi_events() -> tuple[str, list[float]]:
-    """Two bars of kick, snare and hats. Returns the MIDI block and the kick times in seconds."""
-    events = []
-
-    def hit(beat, note, vel=0x7F):
-        events.append((int(beat * PPQ), 0x90, note, vel))
-        events.append((int((beat + 0.25) * PPQ), 0x80, note, 0))
-
-    for bar in range(2):
-        b = bar * 4
-        for q in range(4):
-            hit(b + q, 36)
-        hit(b + 1, 37)
-        hit(b + 3, 37)
-        for e in range(8):
-            hit(b + e * 0.5, 40, 0x60)
-    hit(7.5, 41)
-    events.sort()
-
+def midi_block(events: list[tuple[float, int, int, int]], length_beats: int) -> str:
+    """REAPER MIDI source lines for `(beat, status, data1, data2)` events."""
+    ticks = sorted((int(beat * PPQ), status, d1, d2) for beat, status, d1, d2 in events)
     lines, last = [], 0
-    for tick, status, note, vel in events:
-        lines.append(f"        E {tick - last} {status:02x} {note:02x} {vel:02x}")
+    for tick, status, d1, d2 in ticks:
+        lines.append(f"        E {tick - last} {status:02x} {d1:02x} {d2:02x}")
         last = tick
-    lines.append(f"        E {8 * PPQ - last} b0 7b 00")
+    lines.append(f"        E {length_beats * PPQ - last} b0 7b 00")
+    return "\n".join(lines)
+
+
+def hits(beats, note, vel=0x7F):
+    for beat in beats:
+        yield (beat, 0x90, note, vel)
+        yield (beat + 0.25, 0x80, note, 0)
+
+
+def groove() -> tuple[str, list[float]]:
+    """Two bars of kick, snare and hats. Returns the MIDI block and the kick times in seconds."""
+    events = list(hits(range(8), 36))
+    events += hits([1, 3, 5, 7], 37)
+    events += hits([e * 0.5 for e in range(16)], 40, 0x60)
+    events += hits([7.5], 41)
     kicks = [beat * 60 / BPM for beat in range(8)]
-    return "\n".join(lines), kicks
+    return midi_block(events, 8), kicks
 
 
-def project(out_wav: str) -> tuple[str, list[float]]:
-    midi, kicks = midi_events()
-    rpp = f"""<REAPER_PROJECT 0.1 "7.0" 1700000000
+def project(out_wav: str, state: str, midi: str) -> str:
+    return f"""<REAPER_PROJECT 0.1 "7.0" 1700000000
   TEMPO {BPM} 4 4
   SAMPLERATE 48000 0 0
   RENDER_FILE "{out_wav}"
@@ -98,7 +101,7 @@ def project(out_wav: str) -> tuple[str, list[float]]:
       <CLAP "CLAPi: Klopfer (Klopfer)" com.klopfer.drum-sampler ""
         CFG 4 760 456 ""
         <STATE
-{plugin_state()}
+{state}
         >
       >
       FLOATPOS 0 0 0 0
@@ -115,7 +118,6 @@ def project(out_wav: str) -> tuple[str, list[float]]:
   >
 >
 """
-    return rpp, kicks
 
 
 def read_left(path: str) -> tuple[list[float], int]:
@@ -128,31 +130,41 @@ def read_left(path: str) -> tuple[list[float], int]:
     return left, sr
 
 
-def main() -> int:
-    reaper = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_REAPER
-    if not os.path.exists(KIT):
-        print("Test kit missing, run: cargo run -p testkit -- testkit-out")
-        return 1
-
+def render(reaper: str, rpp: str) -> tuple[list[float], int] | None:
     tmp = tempfile.mkdtemp(prefix="klopfer-reaper-")
-    out_wav = os.path.join(tmp, "render.wav")
-    rpp_path = os.path.join(tmp, "test.rpp")
-    rpp, kicks = project(out_wav)
-    open(rpp_path, "w").write(rpp)
+    try:
+        out_wav = os.path.join(tmp, "render.wav")
+        rpp_path = os.path.join(tmp, "test.rpp")
+        open(rpp_path, "w").write(rpp.replace("{OUT}", out_wav))
+        proc = subprocess.run(
+            [reaper, "-nosplash", "-renderproject", rpp_path], capture_output=True, text=True, timeout=120
+        )
+        time.sleep(1)
+        if proc.returncode != 0 or not os.path.exists(out_wav):
+            print("REAPER failed:", proc.returncode, proc.stderr[-2000:])
+            return None
+        return read_left(out_wav)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
-    proc = subprocess.run([reaper, "-nosplash", "-renderproject", rpp_path], capture_output=True, text=True, timeout=120)
-    time.sleep(1)
-    if proc.returncode != 0 or not os.path.exists(out_wav):
-        print("REAPER failed:", proc.returncode, proc.stderr[-2000:])
-        return 1
 
-    left, sr = read_left(out_wav)
+def rms(s: list[float]) -> float:
+    return math.sqrt(sum(x * x for x in s) / max(1, len(s)))
+
+
+def test_groove(reaper: str) -> list[str]:
+    """Kit loads from the state, notes trigger the right pads, levels are sane."""
+    midi, kicks = groove()
+    result = render(reaper, project("{OUT}", plugin_state(), midi))
+    if result is None:
+        return ["groove: render failed"]
+    left, sr = result
     peak = max(abs(x) for x in left)
     failures = []
     if peak < 0.05:
-        failures.append(f"output is (nearly) silent, peak {peak:.3f}")
+        failures.append(f"groove: output is (nearly) silent, peak {peak:.3f}")
     if peak >= 0.999:
-        failures.append(f"output clips, peak {peak:.3f}")
+        failures.append(f"groove: output clips, peak {peak:.3f}")
 
     # Every kick must produce an onset: the 10 ms after it are much louder than the 10 ms before
     win = sr // 100
@@ -160,15 +172,42 @@ def main() -> int:
         i = int(t * sr)
         before = left[max(0, i - win) : i] or [0.0]
         after = left[i : i + win]
-        rms = lambda s: math.sqrt(sum(x * x for x in s) / len(s))
         if rms(after) < 0.05 or rms(after) < 2 * rms(before):
-            failures.append(f"no onset at {t:.2f}s (before {rms(before):.3f}, after {rms(after):.3f})")
+            failures.append(f"groove: no onset at {t:.2f}s (before {rms(before):.3f}, after {rms(after):.3f})")
+    print(f"groove: {len(kicks)} kicks, peak {20 * math.log10(max(peak, 1e-9)):.1f} dBFS")
+    return failures
 
-    shutil.rmtree(tmp, ignore_errors=True)
+
+def test_midi_learn(reaper: str) -> list[str]:
+    """A saved MIDI learn assignment (CC 20 -> master) works in the host: CC value 0 halfway through
+    turns the master down to -60 dB."""
+    events = list(hits(range(8), 36))
+    events.append((3.9, 0xB0, 20, 0))
+    state = plugin_state({"midi-map": json.dumps([[20, "master"]])})
+    result = render(reaper, project("{OUT}", state, midi_block(events, 8)))
+    if result is None:
+        return ["midi learn: render failed"]
+    left, sr = result
+    first, second = left[: 2 * sr], left[2 * sr : 4 * sr]
+    print(f"midi learn: rms before CC {rms(first):.4f}, after {rms(second):.5f}")
+    if rms(first) < 0.01:
+        return ["midi learn: kicks before the CC are silent"]
+    if rms(second) > rms(first) / 100:
+        return ["midi learn: CC 20 did not turn the master down"]
+    return []
+
+
+def main() -> int:
+    reaper = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_REAPER
+    if not os.path.exists(KIT):
+        print("Test kit missing, run: cargo run -p testkit -- testkit-out")
+        return 1
+
+    failures = test_groove(reaper) + test_midi_learn(reaper)
     if failures:
         print("FAILED:\n  " + "\n  ".join(failures))
         return 1
-    print(f"OK: {len(kicks)} onsets, peak {20 * math.log10(peak):.1f} dBFS")
+    print("OK")
     return 0
 
 

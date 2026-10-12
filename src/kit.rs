@@ -4,30 +4,46 @@
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
-use klopfer_dsp::NUM_PADS;
+use klopfer_dsp::{slot_index, NUM_LAYERS, NUM_PADS, NUM_SAMPLE_SLOTS};
 use nih_plug::prelude::PluginState;
+
+use crate::layers::LayerConfig;
 
 pub const EXTENSION: &str = "klopfer";
 
+/// Fields that belong to the session, not to the kit
 const EDITOR_STATE_KEY: &str = "editor-state";
+const MIDI_MAP_KEY: &str = "midi-map";
 const KIT_NAME_KEY: &str = "kit-name";
 
-fn path_key(pad: usize) -> String {
-    format!("path_{}", pad + 1)
-}
-
-fn get_path(state: &PluginState, pad: usize) -> Option<String> {
+fn json_field<T: serde::de::DeserializeOwned>(state: &PluginState, key: &str) -> Option<T> {
     state
         .fields
-        .get(&path_key(pad))
-        .and_then(|v| serde_json::from_str::<Option<String>>(v).ok())
-        .flatten()
+        .get(key)
+        .and_then(|v| serde_json::from_str(v).ok())
 }
 
-fn set_path(state: &mut PluginState, pad: usize, path: Option<String>) {
-    // Serializing an Option<String> can't fail
-    let json = serde_json::to_string(&path).unwrap_or_else(|_| String::from("null"));
-    state.fields.insert(path_key(pad), json);
+fn set_json_field(state: &mut PluginState, key: String, value: &impl serde::Serialize) {
+    if let Ok(json) = serde_json::to_string(value) {
+        state.fields.insert(key, json);
+    }
+}
+
+/// A pad's layers. Single-sample states from before layers existed become layer 1.
+pub fn pad_layers(state: &PluginState, pad: usize) -> LayerConfig {
+    let mut cfg: LayerConfig =
+        json_field(state, &format!("layers_{}", pad + 1)).unwrap_or_default();
+    let legacy: Option<String> =
+        json_field::<Option<String>>(state, &format!("path_{}", pad + 1)).flatten();
+    if cfg.layers[0].path.is_none() {
+        cfg.layers[0].path = legacy;
+    }
+    cfg
+}
+
+fn set_pad_layers(state: &mut PluginState, pad: usize, cfg: &LayerConfig) {
+    set_json_field(state, format!("layers_{}", pad + 1), cfg);
+    set_json_field(state, format!("path_{}", pad + 1), &None::<String>);
 }
 
 fn kit_name(path: &Path) -> String {
@@ -60,29 +76,60 @@ fn relative_to(path: &Path, base: &Path) -> Option<String> {
     Some(parts?.join("/"))
 }
 
+/// Resolves a sample path read from a kit in `base` to a local absolute path.
+fn resolve(path: &str, base: &Path) -> String {
+    // Kits may come from anywhere: replace network paths by the file name next to the kit,
+    // without touching the network
+    if is_network_path(path) {
+        let name = path.rsplit(['\\', '/']).next().unwrap_or_default();
+        return base.join(name).to_string_lossy().into_owned();
+    }
+
+    let p = PathBuf::from(path);
+    let resolved = if p.is_relative() {
+        base.join(&p)
+    } else if !p.exists() {
+        // Samples that moved together with the kit are found next to it
+        p.file_name()
+            .map(|f| base.join(f))
+            .filter(|c| c.exists())
+            .unwrap_or(p)
+    } else {
+        p
+    };
+    resolved.to_string_lossy().into_owned()
+}
+
+fn set_kit_name(state: &mut PluginState, path: &Path) {
+    set_json_field(state, KIT_NAME_KEY.to_owned(), &kit_name(path));
+}
+
 pub fn save(state: &PluginState, path: &Path) -> Result<(), String> {
     let mut state = state.clone();
     let base = path.parent().unwrap_or(Path::new(""));
 
     state.fields.remove(EDITOR_STATE_KEY);
-    state.fields.insert(
-        KIT_NAME_KEY.to_owned(),
-        serde_json::to_string(&kit_name(path)).map_err(|e| e.to_string())?,
-    );
+    state.fields.remove(MIDI_MAP_KEY);
+    set_kit_name(&mut state, path);
     for pad in 0..NUM_PADS {
-        if let Some(p) = get_path(&state, pad) {
-            if let Some(rel) = relative_to(Path::new(&p), base) {
-                set_path(&mut state, pad, Some(rel));
+        let mut cfg = pad_layers(&state, pad);
+        for layer in &mut cfg.layers {
+            if let Some(rel) = layer
+                .path
+                .as_deref()
+                .and_then(|p| relative_to(Path::new(p), base))
+            {
+                layer.path = Some(rel);
             }
         }
+        set_pad_layers(&mut state, pad, &cfg);
     }
 
     let json = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
     std::fs::write(path, json).map_err(|e| format!("cannot write kit: {e}"))
 }
 
-/// Loads a kit and resolves its sample paths to absolute paths. Samples that moved together with
-/// the kit file are found next to it.
+/// Loads a kit and resolves its sample paths to local absolute paths.
 pub fn load(path: &Path) -> Result<PluginState, String> {
     let json = std::fs::read_to_string(path).map_err(|e| format!("cannot read kit: {e}"))?;
     let mut state: PluginState =
@@ -90,64 +137,42 @@ pub fn load(path: &Path) -> Result<PluginState, String> {
     let base = path.parent().unwrap_or(Path::new(""));
 
     state.fields.remove(EDITOR_STATE_KEY);
-    state.fields.insert(
-        KIT_NAME_KEY.to_owned(),
-        serde_json::to_string(&kit_name(path)).map_err(|e| e.to_string())?,
-    );
+    state.fields.remove(MIDI_MAP_KEY);
+    set_kit_name(&mut state, path);
     for pad in 0..NUM_PADS {
-        // Pads the kit doesn't mention must not keep the previous kit's sample
+        // Pads the kit doesn't mention must not keep the previous kit's samples. Missing layer
+        // fields deserialize to the defaults, i.e. no samples.
         state
             .fields
             .entry(format!("name_{}", pad + 1))
             .or_insert_with(|| String::from("\"\""));
-        let Some(p) = get_path(&state, pad) else {
-            set_path(&mut state, pad, None);
-            continue;
-        };
-        // Kits may come from anywhere: replace network paths by the file name next to the kit,
-        // without touching the network
-        if is_network_path(&p) {
-            let name = p.rsplit(['\\', '/']).next().unwrap_or_default();
-            let local = base.join(name).to_string_lossy().into_owned();
-            set_path(&mut state, pad, Some(local));
-            continue;
+        let mut cfg = pad_layers(&state, pad);
+        for layer in &mut cfg.layers {
+            layer.path = layer.path.as_deref().map(|p| resolve(p, base));
         }
-
-        let p = PathBuf::from(p);
-        let resolved = if p.is_relative() {
-            base.join(&p)
-        } else if !p.exists() {
-            p.file_name()
-                .map(|f| base.join(f))
-                .filter(|c| c.exists())
-                .unwrap_or(p)
-        } else {
-            p
-        };
-        set_path(
-            &mut state,
-            pad,
-            Some(resolved.to_string_lossy().into_owned()),
-        );
+        set_pad_layers(&mut state, pad, &cfg);
     }
 
     Ok(state)
 }
 
-/// The sample paths stored in a state object, indexed by pad.
-pub fn sample_paths(state: &PluginState) -> [Option<String>; NUM_PADS] {
-    std::array::from_fn(|pad| get_path(state, pad))
+/// The sample paths stored in a state object, indexed by sample slot.
+pub fn sample_paths(state: &PluginState) -> Vec<Option<String>> {
+    let mut paths = vec![None; NUM_SAMPLE_SLOTS];
+    for pad in 0..NUM_PADS {
+        let cfg = pad_layers(state, pad);
+        for layer in 0..NUM_LAYERS {
+            paths[slot_index(pad, layer)] = cfg.layers[layer].path.clone();
+        }
+    }
+    paths
 }
 
 /// The pad names stored in a state object, indexed by pad.
-pub fn pad_names(state: &PluginState) -> [String; NUM_PADS] {
-    std::array::from_fn(|pad| {
-        state
-            .fields
-            .get(&format!("name_{}", pad + 1))
-            .and_then(|v| serde_json::from_str(v).ok())
-            .unwrap_or_default()
-    })
+pub fn pad_names(state: &PluginState) -> Vec<String> {
+    (0..NUM_PADS)
+        .map(|pad| json_field(state, &format!("name_{}", pad + 1)).unwrap_or_default())
+        .collect()
 }
 
 /// Upper bound for directory entries visited by [`find_missing()`], so picking a huge folder
@@ -199,16 +224,27 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    fn state_with_paths(paths: &[(usize, &str)]) -> PluginState {
-        let mut state = PluginState {
+    fn empty_state() -> PluginState {
+        PluginState {
             version: String::from("0.1.0"),
             params: BTreeMap::new(),
             fields: BTreeMap::new(),
-        };
+        }
+    }
+
+    /// Paths for layer 1 of the given pads.
+    fn state_with_paths(paths: &[(usize, &str)]) -> PluginState {
+        let mut state = empty_state();
         for (pad, p) in paths {
-            set_path(&mut state, *pad, Some(p.to_string()));
+            let mut cfg = LayerConfig::default();
+            cfg.layers[0].path = Some(p.to_string());
+            set_pad_layers(&mut state, *pad, &cfg);
         }
         state
+    }
+
+    fn layer_path(state: &PluginState, pad: usize, layer: usize) -> Option<String> {
+        sample_paths(state)[slot_index(pad, layer)].clone()
     }
 
     #[test]
@@ -228,9 +264,14 @@ mod tests {
         assert!(!raw.contains(dir.to_str().unwrap()));
 
         let loaded = load(&kit).unwrap();
-        let paths = sample_paths(&loaded);
-        assert_eq!(paths[0].as_deref(), Some(kick.to_str().unwrap()));
-        assert_eq!(paths[5].as_deref(), Some("/elsewhere/snare.wav"));
+        assert_eq!(
+            layer_path(&loaded, 0, 0).as_deref(),
+            Some(kick.to_str().unwrap())
+        );
+        assert_eq!(
+            layer_path(&loaded, 5, 0).as_deref(),
+            Some("/elsewhere/snare.wav")
+        );
         assert_eq!(loaded.fields[KIT_NAME_KEY], "\"My Kit\"");
 
         assert_eq!(
@@ -263,7 +304,7 @@ mod tests {
         std::fs::write(&kit, serde_json::to_string(&state).unwrap()).unwrap();
 
         let loaded = load(&kit).unwrap();
-        let path = sample_paths(&loaded)[0].clone().unwrap();
+        let path = layer_path(&loaded, 0, 0).unwrap();
         assert_eq!(Path::new(&path), dir.join("kick.wav"));
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -287,6 +328,40 @@ mod tests {
         );
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, 1);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn single_sample_states_migrate_to_layer_one() {
+        let mut state = empty_state();
+        state
+            .fields
+            .insert(String::from("path_3"), String::from("\"/old/clap.wav\""));
+        assert_eq!(layer_path(&state, 2, 0).as_deref(), Some("/old/clap.wav"));
+        assert_eq!(layer_path(&state, 2, 1), None);
+    }
+
+    #[test]
+    fn all_layers_are_resolved_and_session_fields_dropped() {
+        let dir = std::env::temp_dir().join(format!("klopfer-layers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = empty_state();
+        let mut cfg = LayerConfig::default();
+        cfg.layers[2].path = Some(String::from("soft.wav"));
+        set_pad_layers(&mut state, 7, &cfg);
+        state
+            .fields
+            .insert(String::from(MIDI_MAP_KEY), String::from("[[1,\"vol_1\"]]"));
+        let kit = dir.join("layers.klopfer");
+        std::fs::write(&kit, serde_json::to_string(&state).unwrap()).unwrap();
+
+        let loaded = load(&kit).unwrap();
+        assert_eq!(
+            layer_path(&loaded, 7, 2),
+            Some(dir.join("soft.wav").to_string_lossy().into_owned())
+        );
+        assert!(!loaded.fields.contains_key(MIDI_MAP_KEY));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

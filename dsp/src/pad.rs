@@ -3,6 +3,7 @@
 
 use crate::biquad::BiquadCoeffs;
 use crate::envelope::{exp_coeff, AhdsrCoeffs};
+use crate::modulation::{LfoShape, ModSlot, NUM_SLOTS};
 use crate::svf::SvfMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -25,6 +26,41 @@ impl FilterMode {
     }
 }
 
+/// AHDSR times in milliseconds, sustain `0..1`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EnvParams {
+    pub attack_ms: f32,
+    pub hold_ms: f32,
+    pub decay_ms: f32,
+    pub sustain: f32,
+    pub release_ms: f32,
+}
+
+impl EnvParams {
+    pub fn coeffs(&self, sample_rate: f32) -> AhdsrCoeffs {
+        AhdsrCoeffs::new(
+            self.attack_ms / 1000.0,
+            self.hold_ms / 1000.0,
+            self.decay_ms / 1000.0,
+            self.sustain,
+            self.release_ms / 1000.0,
+            sample_rate,
+        )
+    }
+}
+
+impl Default for EnvParams {
+    fn default() -> Self {
+        Self {
+            attack_ms: 0.0,
+            hold_ms: 0.0,
+            decay_ms: 500.0,
+            sustain: 1.0,
+            release_ms: 200.0,
+        }
+    }
+}
+
 /// User-facing pad parameters in their natural units.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PadParams {
@@ -38,15 +74,10 @@ pub struct PadParams {
     pub start: f32,
     pub end: f32,
     pub reverse: bool,
-    /// Gate mode releases the amp envelope on note off, one-shot mode ignores note offs
+    /// Gate mode releases the envelopes on note off, one-shot mode ignores note offs
     pub gate: bool,
 
-    pub attack_ms: f32,
-    pub hold_ms: f32,
-    pub decay_ms: f32,
-    /// `0..1`
-    pub sustain: f32,
-    pub release_ms: f32,
+    pub amp: EnvParams,
     /// `0..1`: how much velocity affects the level
     pub velocity_sens: f32,
 
@@ -73,6 +104,15 @@ pub struct PadParams {
     /// Sample-and-hold factor, 1 = off
     pub downsample: f32,
 
+    pub lfo_shape: LfoShape,
+    /// Already resolved from the tempo when synced
+    pub lfo_rate_hz: f32,
+    /// Restart the LFO on every hit instead of running freely
+    pub lfo_retrigger: bool,
+    pub mod_env1: EnvParams,
+    pub mod_env2: EnvParams,
+    pub slots: [ModSlot; NUM_SLOTS],
+
     /// `0` = no choke group
     pub choke_group: u8,
     /// Output bus index, `0` = main
@@ -90,11 +130,7 @@ impl Default for PadParams {
             end: 1.0,
             reverse: false,
             gate: false,
-            attack_ms: 0.0,
-            hold_ms: 0.0,
-            decay_ms: 500.0,
-            sustain: 1.0,
-            release_ms: 200.0,
+            amp: EnvParams::default(),
             velocity_sens: 1.0,
             filter_mode: FilterMode::Off,
             cutoff_hz: 20000.0,
@@ -109,6 +145,12 @@ impl Default for PadParams {
             eq_q: 0.7,
             bits: 24.0,
             downsample: 1.0,
+            lfo_shape: LfoShape::Sine,
+            lfo_rate_hz: 2.0,
+            lfo_retrigger: true,
+            mod_env1: EnvParams::default(),
+            mod_env2: EnvParams::default(),
+            slots: [ModSlot::default(); NUM_SLOTS],
             choke_group: 0,
             output: 0,
         }
@@ -118,6 +160,7 @@ impl Default for PadParams {
 /// Derived per-pad values, recomputed once per processing block.
 #[derive(Debug, Clone, Copy)]
 pub struct PadSettings {
+    pub sample_rate: f32,
     pub gain: f32,
     pub pan: f32,
     pub tune: f32,
@@ -125,6 +168,7 @@ pub struct PadSettings {
     pub end: f32,
     pub reverse: bool,
     pub gate: bool,
+    pub amp_params: EnvParams,
     pub amp: AhdsrCoeffs,
     pub velocity_sens: f32,
 
@@ -133,8 +177,8 @@ pub struct PadSettings {
     pub resonance: f32,
     pub filter_env_octaves: f32,
     pub filter_env_coeff: f32,
-    /// Pre-gain into the saturator, `1.0` means no drive
-    pub drive_gain: f32,
+    /// `0..1`
+    pub drive: f32,
 
     pub pitch_env_semis: f32,
     pub pitch_env_coeff: f32,
@@ -144,20 +188,41 @@ pub struct PadSettings {
     pub bits: f32,
     pub downsample: f32,
 
+    pub lfo_shape: LfoShape,
+    pub lfo_rate_hz: f32,
+    pub lfo_retrigger: bool,
+    pub mod_env1: AhdsrCoeffs,
+    pub mod_env2: AhdsrCoeffs,
+    /// The active slots are moved to the front, `num_slots` of them
+    pub slots: [ModSlot; NUM_SLOTS],
+    pub num_slots: usize,
+    /// Whether any active slot targets a note-on-only destination
+    pub has_note_on_mod: bool,
+
     pub choke_group: u8,
     pub output: usize,
 }
 
 impl PadSettings {
     pub fn new(p: &PadParams, sample_rate: f32) -> Self {
-        let ms = |v: f32| v / 1000.0;
         let (start, end) = if p.start <= p.end {
             (p.start, p.end)
         } else {
             (p.end, p.start)
         };
 
+        let mut slots = [ModSlot::default(); NUM_SLOTS];
+        let mut num_slots = 0;
+        for slot in p.slots.iter().filter(|s| s.is_active()) {
+            slots[num_slots] = *slot;
+            num_slots += 1;
+        }
+        let has_note_on_mod = slots[..num_slots]
+            .iter()
+            .any(|s| s.target.is_note_on_only());
+
         Self {
+            sample_rate,
             gain: if p.mute {
                 0.0
             } else {
@@ -169,29 +234,36 @@ impl PadSettings {
             end: end.clamp(0.0, 1.0),
             reverse: p.reverse,
             gate: p.gate,
-            amp: AhdsrCoeffs::new(
-                ms(p.attack_ms),
-                ms(p.hold_ms),
-                ms(p.decay_ms),
-                p.sustain,
-                ms(p.release_ms),
-                sample_rate,
-            ),
+            amp_params: p.amp,
+            amp: p.amp.coeffs(sample_rate),
             velocity_sens: p.velocity_sens.clamp(0.0, 1.0),
             filter: p.filter_mode.svf_mode(),
             cutoff_hz: p.cutoff_hz,
             resonance: p.resonance,
             filter_env_octaves: p.filter_env_octaves,
-            filter_env_coeff: exp_coeff(ms(p.filter_env_decay_ms), sample_rate),
-            drive_gain: 1.0 + 15.0 * p.drive.clamp(0.0, 1.0).powi(2),
+            filter_env_coeff: exp_coeff(p.filter_env_decay_ms / 1000.0, sample_rate),
+            drive: p.drive.clamp(0.0, 1.0),
             pitch_env_semis: p.pitch_env_semis,
-            pitch_env_coeff: exp_coeff(ms(p.pitch_env_decay_ms), sample_rate),
+            pitch_env_coeff: exp_coeff(p.pitch_env_decay_ms / 1000.0, sample_rate),
             eq: BiquadCoeffs::peaking(p.eq_freq_hz, p.eq_q, p.eq_gain_db, sample_rate),
             bits: p.bits,
             downsample: p.downsample,
+            lfo_shape: p.lfo_shape,
+            lfo_rate_hz: p.lfo_rate_hz,
+            lfo_retrigger: p.lfo_retrigger,
+            mod_env1: p.mod_env1.coeffs(sample_rate),
+            mod_env2: p.mod_env2.coeffs(sample_rate),
+            slots,
+            num_slots,
+            has_note_on_mod,
             choke_group: p.choke_group,
             output: p.output as usize,
         }
+    }
+
+    #[inline]
+    pub fn active_slots(&self) -> &[ModSlot] {
+        &self.slots[..self.num_slots]
     }
 }
 

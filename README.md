@@ -7,14 +7,27 @@ License: GPL-3.0-or-later (required by the VST3 bindings nih-plug uses).
 
 ## Features
 
-- 16 pads, MIDI notes from C1 (36) upwards, freely assignable; pads sharing a note are layered
+- 32 pads in two banks (A/B), MIDI notes from C1 (36) upwards, freely assignable; pads sharing a
+  note play together
+- Up to 4 sample layers per pad with velocity ranges, gain and tuning; layer modes velocity,
+  round robin and random
 - Per pad: tune ±48 st + fine, start/end, reverse, one-shot/gate mode, AHDSR, velocity
   sensitivity, LP/HP/BP filter with envelope and drive, pitch envelope, parametric EQ band,
   bit/sample rate reduction, volume, pan, mute, choke group (16), output (main + 15 stereo aux)
+- Modulation per pad: LFO (6 shapes, free or tempo-synced, retrigger), two AHDSR mod envelopes and
+  an 8 slot matrix. Sources: LFO, mod envelopes, amp envelope, velocity, random, noise. Targets:
+  pitch, cutoff, resonance, drive, pan, volume, sample start/end, LFO rate, bits, downsample, amp
+  attack/decay
+- MIDI learn: right-click any knob, toggle or fader. Assignments are stored in the project, not in
+  kits, and work while the editor is closed
 - WAV, AIFF, FLAC, OGG and MP3 samples, decoded on a background thread
-- Projects store sample paths; missing samples can be relinked per pad or by searching a folder
-- Kit files (`.klopfer`) store samples relative to the kit, so kit folders stay portable
-- GUI: pad grid with audition, pad editor with waveform and draggable start/end markers, mixer view
+- Projects store sample paths; missing samples can be relinked per layer or by searching a folder
+- Kit files (`.klopfer`) store samples relative to the kit, so kit folders stay portable. Kits and
+  projects from the single-sample version are migrated to layer 1
+- GUI: pad grid with audition, pad editor (MAIN / LAYERS / MOD) with waveform and draggable
+  start/end markers, mixer view
+
+Parameter IDs and enum variant IDs are stable and must not change, saved projects depend on them.
 
 ## Layout
 
@@ -46,7 +59,8 @@ via XWayland.
 ```bash
 cargo test --workspace
 cargo run -p testkit -- testkit-out              # synthetic kit in testkit-out/
-python3 tools/reaper-render-test.py              # needs REAPER and the installed CLAP
+python3 tools/reaper-render-test.py              # needs REAPER and the installed CLAP:
+                                                 # groove from the test kit, MIDI learn in the host
 ```
 
 Standalone with the test kit preloaded (`KLOPFER_KIT` only works in the standalone build):
@@ -56,7 +70,8 @@ cargo build --release --features standalone --bin klopfer_standalone
 KLOPFER_KIT=$PWD/testkit-out/Testkit.klopfer ./target/release/klopfer_standalone -b core-audio -l 2
 ```
 
-`-l 2` selects the stereo layout. The standalone uses the output device's sample rate unless
+`KLOPFER_EDITOR=pad=13,tab=mod` (also `tab=layers`, `view=mixer`) opens the standalone editor in
+a given state, e.g. for screenshots. `-l 2` selects the stereo layout. The standalone uses the output device's sample rate unless
 `-r` is given, because nih-plug's CoreAudio/WASAPI backend aborts on a sample rate mismatch. Use
 `-b dummy` for a GUI check without audio, `--midi-input "<device>"` for a MIDI keyboard.
 
@@ -69,5 +84,5 @@ KLOPFER_KIT=$PWD/testkit-out/Testkit.klopfer ./target/release/klopfer_standalone
 
 ## Roadmap
 
-- Phase 4: velocity layers and round robin, LFO + mod matrix, 32/64 pads, MIDI learn
 - Phase 5: slicing, recording, time stretch, SFZ import
+- Drag and drop from the file manager (needs an egui-baseview change)

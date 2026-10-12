@@ -1,4 +1,4 @@
-//! Klopfer: a 16 pad drum sampler.
+//! Klopfer: a 32 pad drum sampler.
 
 // Triggered by the VST3 bindings' macros, not by our code
 #![allow(semicolon_in_expressions_from_non_local_macros)]
@@ -7,17 +7,30 @@ use std::num::NonZeroU32;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use klopfer_dsp::{Engine, PadSettings, Sample, NUM_OUTPUTS, NUM_PADS};
+use klopfer_dsp::{
+    slot_index, Engine, PadLayers, PadSettings, Sample, NUM_LAYERS, NUM_OUTPUTS, NUM_PADS,
+    NUM_SAMPLE_SLOTS,
+};
 use nih_plug::prelude::*;
 
 mod bank;
 mod editor;
 pub mod kit;
+mod layers;
 pub mod loader;
+mod midi_learn;
 mod params;
 
 use bank::{Preview, SampleBank};
+use midi_learn::{prune_overrides, set_override, MidiLearn, Override, Overrides};
 use params::KlopferParams;
+
+/// Time constant of the master gain smoothing
+const MASTER_SMOOTHING_MS: f32 = 10.0;
+/// Upper bound for parameters overridden by MIDI learn at the same time
+const MAX_OVERRIDES: usize = 128;
+/// Tempo for synced LFOs when the host doesn't report one
+const DEFAULT_TEMPO: f64 = 120.0;
 
 /// Pad meters fall by 20 dB within this time.
 const METER_DECAY_MS: f32 = 300.0;
@@ -28,19 +41,55 @@ const AUX_NAMES: [&str; NUM_OUTPUTS - 1] = [
     "Out 12", "Out 13", "Out 14", "Out 15", "Out 16",
 ];
 
+/// The parts of the host transport the LFOs need.
+#[derive(Debug, Clone, Copy)]
+struct TransportInfo {
+    tempo: f64,
+    playing: bool,
+    pos_beats: Option<f64>,
+}
+
+impl TransportInfo {
+    const STOPPED: Self = Self {
+        tempo: DEFAULT_TEMPO,
+        playing: false,
+        pos_beats: None,
+    };
+
+    fn from_host(t: &Transport) -> Self {
+        Self {
+            tempo: t.tempo.unwrap_or(DEFAULT_TEMPO),
+            playing: t.playing,
+            pos_beats: t.pos_beats(),
+        }
+    }
+}
+
 pub enum Task {
-    Load { pad: usize, path: Option<String> },
+    /// Load a sample slot, see [`klopfer_dsp::slot_index()`]
+    Load { slot: usize, path: Option<String> },
+    /// Store the MIDI learn assignments in the plugin state
+    PersistMidiMap,
 }
 
 pub struct Klopfer {
     params: Arc<KlopferParams>,
     bank: Arc<SampleBank>,
+    learn: Arc<MidiLearn>,
     engine: Engine,
     /// The audio thread's own view of the loaded samples, see [`SampleBank`]
-    slots: [Option<Arc<Sample>>; NUM_PADS],
+    slots: Vec<Option<Arc<Sample>>>,
     settings: [PadSettings; NUM_PADS],
+    layers: [PadLayers; NUM_PADS],
     notes: [u8; NUM_PADS],
+    /// MIDI learn values the host doesn't know about yet
+    overrides: Vec<Override>,
     meter_decay: f32,
+    /// Master gain target (with MIDI learn applied), the current smoothed gain and the
+    /// per-sample smoothing coefficient
+    master_target: f32,
+    master_gain: f32,
+    master_coeff: f32,
 }
 
 /// Development helper for the standalone build: `KLOPFER_KIT=path/to/kit.klopfer` preloads a
@@ -52,10 +101,8 @@ fn preload_dev_kit(params: &KlopferParams) {
     };
     match kit::load(std::path::Path::new(&path)) {
         Ok(state) => {
-            let names = kit::pad_names(&state);
-            for (pad, (path, name)) in kit::sample_paths(&state).into_iter().zip(names).enumerate()
-            {
-                *params.pads[pad].sample_path.write() = path;
+            for (pad, name) in kit::pad_names(&state).into_iter().enumerate() {
+                *params.pads[pad].layers.write() = kit::pad_layers(&state, pad);
                 *params.pads[pad].name.write() = name;
             }
         }
@@ -69,24 +116,50 @@ impl Default for Klopfer {
         #[cfg(feature = "standalone")]
         preload_dev_kit(&params);
 
+        let params = Arc::new(params);
+        // Built after moving the parameters into the Arc, the learn table keeps pointers to them
+        let learn = Arc::new(MidiLearn::new(&*params));
+
         Self {
-            params: Arc::new(params),
+            params,
             bank: Arc::new(SampleBank::default()),
+            learn,
             engine: Engine::new(44100.0),
-            slots: Default::default(),
+            slots: vec![None; NUM_SAMPLE_SLOTS],
             settings: [PadSettings::default(); NUM_PADS],
+            layers: [PadLayers::default(); NUM_PADS],
             notes: [0; NUM_PADS],
+            overrides: Vec::with_capacity(MAX_OVERRIDES),
             meter_decay: 0.0,
+            master_target: 1.0,
+            master_gain: 1.0,
+            master_coeff: 0.0,
         }
     }
 }
 
 impl Klopfer {
-    fn update_settings(&mut self) {
+    fn update_settings(&mut self, transport: TransportInfo) {
         let sample_rate = self.engine.sample_rate();
+        let tempo = transport.tempo;
+        let v = Overrides(&self.overrides);
+        self.master_target = v.float(&self.params.master);
+
         for (i, pad) in self.params.pads.iter().enumerate() {
-            self.settings[i] = PadSettings::new(&pad.to_dsp(), sample_rate);
-            self.notes[i] = pad.note.value() as u8;
+            self.settings[i] = PadSettings::new(&pad.to_dsp(&v, tempo), sample_rate);
+            self.notes[i] = v.int(&pad.note) as u8;
+            // The GUI holds this lock only briefly; keep last block's layers if it's busy
+            if let Some(layers) = pad.layers.try_read() {
+                self.layers[i] = layers.to_dsp();
+            }
+
+            // Free-running synced LFOs follow the song position
+            if v.bool(&pad.lfo_sync) && !v.bool(&pad.lfo_retrigger) && transport.playing {
+                if let Some(beats) = transport.pos_beats {
+                    let cycle = v.enumv(&pad.lfo_division).beats();
+                    self.engine.set_lfo_phase(i, (beats / cycle).fract() as f32);
+                }
+            }
         }
     }
 
@@ -95,7 +168,7 @@ impl Klopfer {
         for pad in 0..NUM_PADS {
             if self.notes[pad] == note {
                 self.engine
-                    .note_on(pad, velocity, &self.slots, &self.settings);
+                    .note_on(pad, velocity, &self.slots, &self.settings, &self.layers);
             }
         }
     }
@@ -142,7 +215,8 @@ impl Plugin for Klopfer {
         },
     ];
 
-    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
+    // CCs are needed for MIDI learn
+    const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
 
     type SysExMessage = ();
@@ -150,8 +224,11 @@ impl Plugin for Klopfer {
 
     fn task_executor(&mut self) -> TaskExecutor<Self> {
         let bank = self.bank.clone();
+        let params = self.params.clone();
+        let learn = self.learn.clone();
         Box::new(move |task| match task {
-            Task::Load { pad, path } => bank.load(pad, path),
+            Task::Load { slot, path } => bank.load(slot, path),
+            Task::PersistMidiMap => *params.midi_map.write() = learn.assignments(),
         })
     }
 
@@ -160,7 +237,12 @@ impl Plugin for Klopfer {
     }
 
     fn editor(&mut self, async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        editor::create(self.params.clone(), self.bank.clone(), async_executor)
+        editor::create(
+            self.params.clone(),
+            self.bank.clone(),
+            self.learn.clone(),
+            async_executor,
+        )
     }
 
     fn initialize(
@@ -171,20 +253,42 @@ impl Plugin for Klopfer {
     ) -> bool {
         self.engine = Engine::new(buffer_config.sample_rate);
         self.meter_decay = 0.1f32.powf(1.0 / (METER_DECAY_MS / 1000.0 * buffer_config.sample_rate));
+        self.master_coeff =
+            (-1.0 / (MASTER_SMOOTHING_MS / 1000.0 * buffer_config.sample_rate)).exp();
+
+        self.learn.set_assignments(&self.params.midi_map.read());
+        self.overrides.clear();
 
         // Load samples synchronously so offline renders never start without them. This is a
-        // no-op for pads whose sample is already loaded.
+        // no-op for slots whose sample is already loaded.
         for (pad, p) in self.params.pads.iter().enumerate() {
-            let path = p.sample_path.read().clone();
-            if self.bank.request(pad, path.clone()) {
-                context.execute(Task::Load { pad, path });
+            // States from before layers existed have a single sample path
+            if let Some(path) = p.sample_path.write().take() {
+                let mut layers = p.layers.write();
+                if layers.layers[0].path.is_none() {
+                    layers.layers[0].path = Some(path);
+                }
+            }
+
+            let paths: Vec<Option<String>> = p
+                .layers
+                .read()
+                .layers
+                .iter()
+                .map(|l| l.path.clone())
+                .collect();
+            for (layer, path) in paths.into_iter().enumerate().take(NUM_LAYERS) {
+                let slot = slot_index(pad, layer);
+                if self.bank.request(slot, path.clone()) {
+                    context.execute(Task::Load { slot, path });
+                }
             }
         }
         let engine = &mut self.engine;
         self.bank
-            .apply_swaps(&mut self.slots, |pad| engine.kill_pad(pad));
+            .apply_swaps(&mut self.slots, |slot| engine.kill_slot(slot));
 
-        self.update_settings();
+        self.update_settings(TransportInfo::STOPPED);
         true
     }
 
@@ -200,14 +304,16 @@ impl Plugin for Klopfer {
     ) -> ProcessStatus {
         let engine = &mut self.engine;
         self.bank
-            .apply_swaps(&mut self.slots, |pad| engine.kill_pad(pad));
-        self.update_settings();
+            .apply_swaps(&mut self.slots, |slot| engine.kill_slot(slot));
+        prune_overrides(&mut self.overrides);
+        let transport = TransportInfo::from_host(context.transport());
+        self.update_settings(transport);
 
         while let Some(preview) = self.bank.previews.pop() {
             match preview {
                 Preview::On { pad, velocity } => {
                     self.engine
-                        .note_on(pad, velocity, &self.slots, &self.settings)
+                        .note_on(pad, velocity, &self.slots, &self.settings, &self.layers)
                 }
                 Preview::Off { pad } => self.engine.note_off(pad, &self.settings),
             }
@@ -232,6 +338,14 @@ impl Plugin for Klopfer {
                     NoteEvent::NoteOn { note, velocity, .. } => self.note_on(note, velocity),
                     NoteEvent::NoteOff { note, .. } => self.note_off(note),
                     NoteEvent::Choke { note, .. } => self.note_off(note),
+                    // All sound off / all notes off
+                    NoteEvent::MidiCC { cc: 120 | 123, .. } => self.engine.choke_all(),
+                    NoteEvent::MidiCC { cc, value, .. } => {
+                        if let Some((ptr, value)) = self.learn.handle_cc(cc, value) {
+                            set_override(&mut self.overrides, ptr, value);
+                            self.update_settings(transport);
+                        }
+                    }
                     _ => {}
                 }
                 next_event = context.next_event();
@@ -240,7 +354,9 @@ impl Plugin for Klopfer {
             let mut bus = [[0.0f32; 2]; NUM_OUTPUTS];
             self.engine
                 .render_frame(&self.slots, &self.settings, &mut bus);
-            let master = self.params.master.smoothed.next();
+            self.master_gain =
+                self.master_target + (self.master_gain - self.master_target) * self.master_coeff;
+            let master = self.master_gain;
 
             if !has_aux {
                 // Stereo layout: fold all buses into the main output
@@ -259,6 +375,15 @@ impl Plugin for Klopfer {
             }
         }
 
+        self.engine.advance_lfo_phases(&self.settings, num_samples);
+        if self
+            .learn
+            .map_changed
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            context.execute_gui(Task::PersistMidiMap);
+        }
+
         let peaks = self.engine.take_pad_peaks();
         if self.params.editor_state.is_open() {
             let decay = self.meter_decay.powi(num_samples as i32);
@@ -274,7 +399,7 @@ impl Plugin for Klopfer {
 
 impl ClapPlugin for Klopfer {
     const CLAP_ID: &'static str = "com.klopfer.drum-sampler";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("A 16 pad drum sampler");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("A 32 pad drum sampler");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[

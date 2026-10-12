@@ -15,15 +15,22 @@ use parking_lot::Mutex;
 use crate::{kit, loader};
 
 pub enum Request {
-    Sample { pad: usize, rename: bool },
+    Sample {
+        pad: usize,
+        layer: usize,
+        rename: bool,
+    },
     RelinkFolder,
     LoadKit,
-    SaveKit { file_name: String },
+    SaveKit {
+        file_name: String,
+    },
 }
 
 pub enum Outcome {
     Sample {
         pad: usize,
+        layer: usize,
         rename: bool,
         path: PathBuf,
     },
@@ -74,10 +81,15 @@ fn run(request: Request, start_dir: Option<PathBuf>) -> Option<Outcome> {
     }
 
     match request {
-        Request::Sample { pad, rename } => dialog
+        Request::Sample { pad, layer, rename } => dialog
             .add_filter("Audio", loader::SUPPORTED_EXTENSIONS)
             .pick_file()
-            .map(|path| Outcome::Sample { pad, rename, path }),
+            .map(|path| Outcome::Sample {
+                pad,
+                layer,
+                rename,
+                path,
+            }),
         Request::RelinkFolder => dialog.pick_folder().map(Outcome::RelinkFolder),
         Request::LoadKit => dialog
             .add_filter("Klopfer Kit", &[kit::EXTENSION])
